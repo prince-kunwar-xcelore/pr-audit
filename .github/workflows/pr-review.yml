@@ -1,0 +1,79 @@
+# AI review of this repo's PRs, using the gateway + pr-audit (allowlist / OIDC mode).
+# Based on examples/pr-review-bun.yml in prince-kunwar-xcelore/agent-gateway.
+#
+# Uses Bun as the runtime — faster CI startup (~1s install), no build step needed.
+# agent-gateway runs directly from TypeScript source via Bun.
+#
+# Pick the agent whose subscription reviews the PR with REVIEW_AGENT below.
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#   AGENT_GATEWAY_URL         — public URL of your proxy, e.g. https://you.ngrok-free.app
+# Auth — one of:
+#   Allowlist (no key):  start the proxy with `serve --allow <owner>/<repo>`. Nothing else needed;
+#                        the job proves its identity with GitHub OIDC (id-token: write below).
+#   Private key:         secret AGENT_GATEWAY_PRIVATE_KEY — contents of your private.pem,
+#                        proxy started with `serve --public-key public.pem`.
+#                        When this secret is set it takes precedence over OIDC.
+
+name: PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+env:
+  REVIEW_AGENT: claude   # claude | codex
+
+jobs:
+  review:
+    name: AI PR Review
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+      id-token: write   # lets the job request an OIDC token for the proxy allowlist
+
+    steps:
+      - name: Checkout PR repo
+        uses: actions/checkout@v4
+
+      - name: Checkout agent-gateway
+        uses: actions/checkout@v4
+        with:
+          repository: prince-kunwar-xcelore/agent-gateway
+          ref: codex-and-oidc   # TODO: drop once codex-and-oidc is merged to main
+          path: _agent-gateway
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install agent-gateway deps
+        run: cd _agent-gateway && bun install
+
+      - name: Checkout pr-audit
+        uses: actions/checkout@v4
+        with:
+          repository: prince-kunwar-xcelore/pr-audit
+          ref: codex-and-oidc   # TODO: drop once codex-and-oidc is merged to main
+          path: _pr-audit
+
+      - name: Install pr-audit deps
+        run: cd _pr-audit && bun install
+
+      - name: Install agent CLI
+        run: |
+          case "$REVIEW_AGENT" in
+            claude) bun install -g @anthropic-ai/claude-code ;;
+            codex)  bun install -g @openai/codex ;;
+          esac
+
+      - name: Run PR Review
+        env:
+          AGENT_GATEWAY_URL: ${{ secrets.AGENT_GATEWAY_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bun ${{ github.workspace }}/_pr-audit/src/index.ts "${{ github.event.pull_request.html_url }}" \
+            --engine "$REVIEW_AGENT-cli" \
+            --auth-token "$(bun ${{ github.workspace }}/_agent-gateway/src/index.ts decrypt-token --agent "$REVIEW_AGENT")"
