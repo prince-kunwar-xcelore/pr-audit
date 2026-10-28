@@ -57,10 +57,8 @@ function makeTempHome(credentialsOrToken: string): string {
 export class ClaudeCliEngine implements ReviewEngine {
   readonly name = 'Claude CLI';
   readonly defaultModel = 'claude-sonnet-5-5';
-  /** Reasoning effort for every call (`claude --effort`). */
-  readonly effort = 'medium';
 
-  constructor(private authToken = '') {}
+  constructor(private authToken = '', readonly effort = 'medium') {}
 
   private buildEnv(): { env: NodeJS.ProcessEnv; tempHome: string | null } {
     if (!this.authToken) return { env: process.env, tempHome: null };

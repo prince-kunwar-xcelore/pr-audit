@@ -38,6 +38,7 @@ pr-audit https://gitlab.com/group/project/-/merge_requests/123
 # Options
 pr-audit owner/repo#123 --engine claude-cli --model claude-opus-4-5   # specific engine + model
 pr-audit owner/repo#123 --engine codex-cli                            # review with Codex
+pr-audit owner/repo#123 --effort high                                 # more reasoning (default: medium)
 pr-audit owner/repo#123 --auth-token sk-ant-...                       # specific auth token
 pr-audit owner/repo#123 --engine codex-cli --auth-token "$(cat ~/.codex/auth.json)"
 pr-audit owner/repo#123 --provider github                             # explicit provider override
@@ -45,7 +46,7 @@ pr-audit owner/repo#123 --dry-run                                     # log payl
 ```
 
 - **Provider** is auto-detected from the input format (`#` → GitHub, `!` → GitLab, URL hostname). Use `--provider` to override (e.g. self-hosted instances).
-- **Engine** defaults to `claude-cli` with model `claude-sonnet-5-5`; `codex-cli` defaults to `gpt-6.1-sol`. Both run at **medium** reasoning effort. Use `--engine` to select an engine; `--model` requires `--engine`.
+- **Engine** defaults to `claude-cli` with model `claude-sonnet-5-5`; `codex-cli` defaults to `gpt-6.1-sol`. Both run at **medium** reasoning effort; override with `--effort` (claude-cli: low, medium, high, xhigh, max; codex-cli: low, medium, high, xhigh, max, ultra). Use `--engine` to select an engine; `--model` requires `--engine`.
 - **Codex** runs `codex exec` in an empty read-only sandbox with your user config ignored, so local MCP servers/hooks don't leak into reviews. It reports token usage but no dollar cost (subscription-billed).
 - **Dry-run** runs the full review (you still pay for Claude tokens) but skips the final post — useful for previewing what would be sent before committing to it.
 

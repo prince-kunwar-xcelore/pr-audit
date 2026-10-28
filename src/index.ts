@@ -3,7 +3,7 @@ import process from 'node:process';
 import { resolveProvider, type GitProvider } from './provider.js';
 import type { PrRef, ReviewOutput, TokenUsage } from './types.js';
 import fs from 'node:fs';
-import { resolveEngine, UsageLimitError } from './engine.js';
+import { resolveEngine, UsageLimitError, DEFAULT_EFFORT, ENGINE_EFFORTS } from './engine.js';
 import { parseDiffString, chunkFiles, validateComments } from './diff.js';
 import { buildPrompt, buildSynthesisPrompt, mergeResults } from './claude.js';
 import { initLogger, log } from './logger.js';
@@ -92,6 +92,7 @@ async function main(): Promise<void> {
   const model = parseFlag(args, '--model');
   const authToken = parseFlag(args, '--auth-token');
   const providerHint = parseFlag(args, '--provider');
+  const effort = parseFlag(args, '--effort');
   const dryRun = args.includes('--dry-run');
 
   if (model && !engineName) {
@@ -99,25 +100,26 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const skipIdxs = flagIndices(args, '--engine', '--model', '--auth-token', '--provider');
+  const skipIdxs = flagIndices(args, '--engine', '--model', '--auth-token', '--provider', '--effort');
   const positional = args.filter((a, i) => !skipIdxs.has(i) && a !== '--dry-run');
   const arg = positional[0];
 
   if (!arg) {
     console.error(
-      'Usage: pr-audit <ref> [--engine <engine>] [--model <model>] [--auth-token <token>] [--provider github|gitlab] [--dry-run]\n' +
+      'Usage: pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token>] [--provider github|gitlab] [--dry-run]\n' +
       '\n' +
       'Supported formats:\n' +
       '  GitHub:  owner/repo#123  or  https://github.com/owner/repo/pull/123\n' +
       '  GitLab:  group/project!123  or  https://gitlab.com/group/project/-/merge_requests/123\n' +
       '\n' +
-      'Engines: claude-cli (default), codex-cli',
+      'Engines: claude-cli (default), codex-cli\n' +
+      `Effort (default ${DEFAULT_EFFORT}): claude-cli ${ENGINE_EFFORTS['claude-cli'].join('|')}; codex-cli ${ENGINE_EFFORTS['codex-cli'].join('|')}`,
     );
     process.exit(1);
   }
 
   const { provider, ref } = resolveProvider(arg, providerHint || undefined);
-  const engine = resolveEngine(engineName || 'claude-cli', authToken);
+  const engine = resolveEngine(engineName || 'claude-cli', authToken, effort || DEFAULT_EFFORT);
   const effectiveModel = model || engine.defaultModel;
 
   const label = `${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}_${ref.slug.replace(/\//g, '_')}_${ref.number}`;
@@ -128,6 +130,7 @@ async function main(): Promise<void> {
   log.info(`Provider: ${provider.name}`);
   log.info(`Engine:   ${engine.name}`);
   log.info(`Model:    ${effectiveModel}`);
+  log.info(`Effort:   ${engine.effort}`);
   if (dryRun) log.info('Mode:     DRY-RUN (no review will be posted)');
   log.info(`Fetching ${provider.reviewTerm} ${ref.slug}#${ref.number}...`);
   console.log(`Logging to ${log.filePath}`);
@@ -234,6 +237,8 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (err) => {
+  // Before initLogger() the logger is a no-op (e.g. bad flags) — print directly
+  if (!log.filePath) console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
   log.error(`[fatal] ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
   await log.close();
   process.exit(1);

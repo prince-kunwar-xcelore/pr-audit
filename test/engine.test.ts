@@ -21,4 +21,13 @@ describe('resolveEngine', () => {
     const engine = resolveEngine('claude-cli', 'my-token');
     expect(engine).toBeDefined();
   });
+
+  it('defaults to medium effort and accepts supported levels', () => {
+    expect(resolveEngine('claude-cli').effort).toBe('medium');
+    expect(resolveEngine('codex-cli', '', 'ultra').effort).toBe('ultra');
+  });
+
+  it('rejects effort levels the engine does not support', () => {
+    expect(() => resolveEngine('claude-cli', '', 'ultra')).toThrow('Unsupported effort "ultra" for claude-cli');
+  });
 });

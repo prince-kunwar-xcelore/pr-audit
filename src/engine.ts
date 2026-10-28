@@ -5,6 +5,8 @@ import { CodexCliEngine } from './engines/codex-cli.js';
 export interface ReviewEngine {
   readonly name: string;
   readonly defaultModel: string;
+  /** Reasoning effort used for every call. */
+  readonly effort: string;
 
   review(prompt: string, model: string): BatchResult;
   synthesize(prompt: string, model: string): string;
@@ -46,12 +48,24 @@ export function detectUsageLimit(engine: string, output: string): UsageLimitErro
   return new UsageLimitError(engine, line.trim().slice(0, 300), resetsAt);
 }
 
-export function resolveEngine(name: string, authToken = ''): ReviewEngine {
+export const DEFAULT_EFFORT = 'medium';
+
+/** Effort levels each engine's CLI accepts (Claude: `claude --effort`; Codex: gpt-6.1 models). */
+export const ENGINE_EFFORTS: Record<string, readonly string[]> = {
+  'claude-cli': ['low', 'medium', 'high', 'xhigh', 'max'],
+  'codex-cli': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+};
+
+export function resolveEngine(name: string, authToken = '', effort = DEFAULT_EFFORT): ReviewEngine {
+  const efforts = ENGINE_EFFORTS[name];
+  if (efforts && !efforts.includes(effort)) {
+    throw new Error(`Unsupported effort "${effort}" for ${name}. Supported: ${efforts.join(', ')}`);
+  }
   switch (name) {
     case 'claude-cli':
-      return new ClaudeCliEngine(authToken);
+      return new ClaudeCliEngine(authToken, effort);
     case 'codex-cli':
-      return new CodexCliEngine(authToken);
+      return new CodexCliEngine(authToken, effort);
     default:
       throw new Error(`Unsupported engine: "${name}". Supported: claude-cli, codex-cli`);
   }

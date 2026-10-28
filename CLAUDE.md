@@ -35,7 +35,7 @@ src/
 **ReviewEngine** (`src/engine.ts`):
 - `review(prompt, model): BatchResult` — structured JSON review of a diff batch
 - `synthesize(prompt, model): string` — plain text summary synthesis
-- `defaultModel` — each engine knows its default (`claude-sonnet-5-5`, `gpt-6.1-sol`); both engines run at medium effort (`claude --effort medium`, codex `-c model_reasoning_effort="medium"`)
+- `defaultModel` — each engine knows its default (`claude-sonnet-5-5`, `gpt-6.1-sol`); effort comes from `--effort` (default medium) and is passed as `claude --effort` / codex `-c model_reasoning_effort`
 - Engines throw `UsageLimitError` (via `detectUsageLimit()`) when the agent subscription is out of quota; `index.ts` skips retries, calls `reportSkipped()`, and exits 0 on GitHub Actions / 3 elsewhere (`EXIT_USAGE_LIMIT`)
 
 ## Data Flow
@@ -54,11 +54,12 @@ parseArgs → resolveProvider + resolveEngine
 ## CLI Flags
 
 ```
-pr-audit <ref> [--engine <engine>] [--model <model>] [--auth-token <token>] [--provider <provider>] [--dry-run]
+pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token>] [--provider <provider>] [--dry-run]
 ```
 
 - `--engine`: Review engine — `claude-cli` (default) or `codex-cli`. Required if `--model` is set.
 - `--model`: Model override. Uses engine's `defaultModel` if omitted.
+- `--effort`: Reasoning effort (default `medium`), validated per engine against `ENGINE_EFFORTS` in `src/engine.ts`.
 - `--auth-token`: Auth token passed to the engine — `claude-cli`: Claude credentials JSON or OAuth access token; `codex-cli`: contents of `~/.codex/auth.json` or an OpenAI API key.
 - `--provider`: Explicit git provider override (default: auto-detected from input).
 - `--dry-run`: Run the review but log the would-be API payload instead of posting. Providers must honor the `dryRun` flag in `postReview()`.

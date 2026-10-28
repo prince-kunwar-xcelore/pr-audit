@@ -46,10 +46,9 @@ function authJson(credentialsOrKey: string): string {
 export class CodexCliEngine implements ReviewEngine {
   readonly name = 'Codex CLI';
   readonly defaultModel = 'gpt-6.1-sol';
-  /** Reasoning effort for every call; set explicitly since user config is ignored. */
-  readonly effort = 'medium';
 
-  constructor(private authToken = '') {}
+  // Effort is always passed explicitly: user config is ignored, and the model's own default is low
+  constructor(private authToken = '', readonly effort = 'medium') {}
 
   private run(prompt: string, model: string, schema: string | null, timeout: number): CodexEvent[] {
     // Empty, read-only working dir: the diff is in the prompt, the agent has nothing to explore.
