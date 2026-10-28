@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import process from 'node:process';
-import { resolveProvider } from './provider.js';
-import { resolveEngine } from './engine.js';
+import { resolveProvider, type GitProvider } from './provider.js';
+import type { PrRef, ReviewOutput, TokenUsage } from './types.js';
+import fs from 'node:fs';
+import { resolveEngine, UsageLimitError } from './engine.js';
 import { parseDiffString, chunkFiles, validateComments } from './diff.js';
 import { buildPrompt, buildSynthesisPrompt, mergeResults } from './claude.js';
 import { initLogger, log } from './logger.js';
@@ -15,13 +17,58 @@ async function withRetry<T>(fn: () => T, retries = 3, label = ''): Promise<T> {
     try {
       return fn();
     } catch (err) {
-      if (attempt === retries) throw err;
+      // Quota exhaustion won't clear in seconds — don't burn retries on it
+      if (attempt === retries || err instanceof UsageLimitError) throw err;
       const delay = 2 ** attempt * 1000;
       log.warn(`${label} attempt ${attempt}/${retries} failed — retrying in ${delay / 1000}s...`);
       await sleep(delay);
     }
   }
   throw new Error('unreachable');
+}
+
+/** Exit code when the review is skipped because the agent's usage limit was hit. */
+export const EXIT_USAGE_LIMIT = 3;
+
+/**
+ * Skip the review instead of failing it: comment on the PR, mark it neutral
+ * where possible, and surface the reason in the CI UI.
+ * GitHub Actions exits 0 (the neutral check run carries the status); elsewhere
+ * exits EXIT_USAGE_LIMIT so CI can treat it as allowed-to-fail (GitLab
+ * `allow_failure: exit_codes`).
+ */
+function handleUsageLimit(
+  err: UsageLimitError,
+  provider: GitProvider,
+  ref: PrRef,
+  headSha: string,
+  reviewTerm: string,
+  dryRun: boolean,
+): number {
+  const title = `AI review skipped: ${err.engine} usage limit reached`;
+  const body =
+    `⏸️ **${title}.**\n\n` +
+    `The ${reviewTerm} was not reviewed because the agent subscription behind this review is out of quota` +
+    `${err.resetsAt ? ` (resets ${err.resetsAt})` : ''}. ` +
+    'Push a new commit or re-run the job after it resets.\n\n' +
+    `<sub>${err.detail.replace(/[<>]/g, '')}</sub>`;
+
+  log.section('SKIPPED: USAGE LIMIT');
+  log.warn(err.message);
+  try {
+    provider.reportSkipped(ref, headSha, title, body, dryRun);
+  } catch {
+    log.warn('[warn] Could not post the skip notice');
+  }
+
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    console.log(`::warning title=${title}::${err.message}`);
+    if (process.env.GITHUB_STEP_SUMMARY) {
+      fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ${title}\n\n${err.message}\n`);
+    }
+    return 0;
+  }
+  return EXIT_USAGE_LIMIT;
 }
 
 function parseFlag(args: string[], flag: string): string {
@@ -109,46 +156,55 @@ async function main(): Promise<void> {
   log.info(`  Est. cost: ~$${estCost.toFixed(3)} (${totalRenderedLines} rendered lines)`);
 
   const results = [];
-  for (let i = 0; i < batches.length; i++) {
-    const batch = batches[i];
-    const totalChanged = batch.reduce((s, f) => s + f.changedLineCount, 0);
+  let merged: ReviewOutput;
+  let totalUsage: TokenUsage;
+  try {
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      const totalChanged = batch.reduce((s, f) => s + f.changedLineCount, 0);
 
-    log.section(`Batch ${i + 1} / ${batches.length}`);
-    log.info(`Reviewing batch ${i + 1}/${batches.length} (${totalChanged} changed lines)...`);
-    log.debug(`  Files in batch: ${batch.map((f) => `${f.path} (${f.changedLineCount} lines)`).join(', ')}`);
+      log.section(`Batch ${i + 1} / ${batches.length}`);
+      log.info(`Reviewing batch ${i + 1}/${batches.length} (${totalChanged} changed lines)...`);
+      log.debug(`  Files in batch: ${batch.map((f) => `${f.path} (${f.changedLineCount} lines)`).join(', ')}`);
 
-    const prompt = buildPrompt(prData, batch, provider.reviewTerm);
-    const result = await withRetry(
-      () => engine.review(prompt, effectiveModel),
-      3,
-      `Batch ${i + 1}/${batches.length}`,
-    );
-    results.push(result);
+      const prompt = buildPrompt(prData, batch, provider.reviewTerm);
+      const result = await withRetry(
+        () => engine.review(prompt, effectiveModel),
+        3,
+        `Batch ${i + 1}/${batches.length}`,
+      );
+      results.push(result);
 
-    const u = result.usage;
-    const tokenLine =
-      `  Tokens: ${u.inputTokens} in / ${u.outputTokens} out` +
-      (u.cacheReadTokens ? ` / ${u.cacheReadTokens} cache-read` : '') +
-      `  Cost: $${u.costUSD.toFixed(4)}`;
-    log.info(tokenLine);
+      const u = result.usage;
+      const tokenLine =
+        `  Tokens: ${u.inputTokens} in / ${u.outputTokens} out` +
+        (u.cacheReadTokens ? ` / ${u.cacheReadTokens} cache-read` : '') +
+        `  Cost: $${u.costUSD.toFixed(4)}`;
+      log.info(tokenLine);
 
-    if (i < batches.length - 1) {
-      await sleep(500);
+      if (i < batches.length - 1) {
+        await sleep(500);
+      }
     }
-  }
 
-  const { review: merged, totalUsage } = mergeResults(results);
+    ({ review: merged, totalUsage } = mergeResults(results));
 
-  if (batches.length > 1) {
-    log.section('SYNTHESIZING SUMMARY');
-    log.info('Synthesizing batch summaries into one...');
-    const synthesisPrompt = buildSynthesisPrompt(
-      prData.title,
-      results.map((r) => r.review.summary),
-      merged.verdict,
-      provider.reviewTerm,
-    );
-    merged.summary = engine.synthesize(synthesisPrompt, effectiveModel);
+    if (batches.length > 1) {
+      log.section('SYNTHESIZING SUMMARY');
+      log.info('Synthesizing batch summaries into one...');
+      const synthesisPrompt = buildSynthesisPrompt(
+        prData.title,
+        results.map((r) => r.review.summary),
+        merged.verdict,
+        provider.reviewTerm,
+      );
+      merged.summary = engine.synthesize(synthesisPrompt, effectiveModel);
+    }
+  } catch (err) {
+    if (!(err instanceof UsageLimitError)) throw err;
+    const code = handleUsageLimit(err, provider, ref, prData.headSha, provider.reviewTerm, dryRun);
+    await log.close();
+    process.exit(code);
   }
 
   if (batches.length > 1) {

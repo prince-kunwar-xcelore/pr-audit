@@ -49,6 +49,19 @@ pr-audit owner/repo#123 --dry-run                                     # log payl
 - **Codex** runs `codex exec` in an empty read-only sandbox with your user config ignored, so local MCP servers/hooks don't leak into reviews. It reports token usage but no dollar cost (subscription-billed).
 - **Dry-run** runs the full review (you still pay for Claude tokens) but skips the final post — useful for previewing what would be sent before committing to it.
 
+## When the agent's usage limit is hit
+
+Subscription quotas reset after hours, so pr-audit doesn't retry or fail the review. It stops at the
+first quota error (Codex: "You've hit your usage limit…", Claude: "usage limit reached"), then:
+
+- comments on the PR/MR: review skipped, with the reset time when the agent states one;
+- **GitHub**: creates a neutral **AI review** check run on the head commit (needs `checks: write`),
+  emits a `::warning` annotation and a job-summary note, and exits `0`;
+- **elsewhere** (GitLab, local): exits `3`. In GitLab CI, `allow_failure: exit_codes: 3` shows the job
+  as "passed with warnings".
+
+Transient errors (HTTP 429, "model at capacity") are still retried.
+
 ## How it works
 
 1. Detects the git provider from the input format and fetches PR/MR metadata + diff via the provider's CLI

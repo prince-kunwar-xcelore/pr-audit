@@ -14,6 +14,12 @@ export interface GitProvider {
     comments: ReviewComment[],
     dryRun?: boolean,
   ): void;
+
+  /**
+   * Report that no review was produced (e.g. the agent's usage limit was hit):
+   * a plain comment, plus a neutral status where the platform supports one.
+   */
+  reportSkipped(ref: PrRef, headSha: string, title: string, body: string, dryRun?: boolean): void;
 }
 
 interface ResolvedProvider {

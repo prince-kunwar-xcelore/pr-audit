@@ -2,7 +2,7 @@ import { execFileSync } from 'child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { ReviewEngine } from '../engine.js';
+import { detectUsageLimit, type ReviewEngine } from '../engine.js';
 import type { ReviewOutput, TokenUsage, BatchResult } from '../types.js';
 import { OUTPUT_SCHEMA } from '../claude.js';
 import { log } from '../logger.js';
@@ -32,13 +32,15 @@ function strictSchema(schema: unknown): unknown {
 // Accepts either the full contents of ~/.codex/auth.json (ChatGPT subscription login)
 // or a bare OpenAI API key.
 function authJson(credentialsOrKey: string): string {
+  let parsed: { tokens?: { access_token?: string }; OPENAI_API_KEY?: string | null };
   try {
-    const parsed = JSON.parse(credentialsOrKey);
-    if (parsed?.tokens?.access_token || parsed?.OPENAI_API_KEY) return credentialsOrKey;
+    parsed = JSON.parse(credentialsOrKey);
   } catch {
     // not JSON — treat as an API key
+    return JSON.stringify({ OPENAI_API_KEY: credentialsOrKey });
   }
-  return JSON.stringify({ OPENAI_API_KEY: credentialsOrKey });
+  if (parsed?.tokens?.access_token || parsed?.OPENAI_API_KEY) return credentialsOrKey;
+  throw new Error('Codex auth token is JSON but has neither tokens.access_token nor OPENAI_API_KEY');
 }
 
 export class CodexCliEngine implements ReviewEngine {
@@ -50,33 +52,33 @@ export class CodexCliEngine implements ReviewEngine {
   private run(prompt: string, model: string, schema: string | null, timeout: number): CodexEvent[] {
     // Empty, read-only working dir: the diff is in the prompt, the agent has nothing to explore.
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-review-'));
-    const args = [
-      'exec',
-      '--model', model,
-      '--json',
-      '--ephemeral',
-      '--skip-git-repo-check',
-      '--ignore-user-config',
-      '--sandbox', 'read-only',
-      '--cd', workDir,
-    ];
-    if (schema) {
-      const schemaPath = path.join(workDir, 'schema.json');
-      fs.writeFileSync(schemaPath, JSON.stringify(strictSchema(JSON.parse(schema))));
-      args.push('--output-schema', schemaPath);
-    }
-    args.push('-');
-
-    const env = { ...process.env };
-    if (this.authToken) {
-      const codexHome = path.join(workDir, '.codex');
-      fs.mkdirSync(codexHome, { mode: 0o700 });
-      fs.writeFileSync(path.join(codexHome, 'auth.json'), authJson(this.authToken), { mode: 0o600 });
-      env.CODEX_HOME = codexHome;
-    }
-
     let raw: string;
     try {
+      const args = [
+        'exec',
+        '--model', model,
+        '--json',
+        '--ephemeral',
+        '--skip-git-repo-check',
+        '--ignore-user-config',
+        '--sandbox', 'read-only',
+        '--cd', workDir,
+      ];
+      if (schema) {
+        const schemaPath = path.join(workDir, 'schema.json');
+        fs.writeFileSync(schemaPath, JSON.stringify(strictSchema(JSON.parse(schema))));
+        args.push('--output-schema', schemaPath);
+      }
+      args.push('-');
+
+      const env = { ...process.env };
+      if (this.authToken) {
+        const codexHome = path.join(workDir, '.codex');
+        fs.mkdirSync(codexHome, { mode: 0o700 });
+        fs.writeFileSync(path.join(codexHome, 'auth.json'), authJson(this.authToken), { mode: 0o600 });
+        env.CODEX_HOME = codexHome;
+      }
+
       raw = execFileSync('codex', args, {
         input: prompt,
         encoding: 'utf8',
@@ -87,6 +89,9 @@ export class CodexCliEngine implements ReviewEngine {
       });
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
+      // codex exits non-zero when the turn fails; the reason is in its JSON events
+      const limit = detectUsageLimit(this.name, `${e.stdout ?? ''}\n${e.stderr ?? ''}`);
+      if (limit) throw limit;
       log.error(`codex CLI error: ${e.message}`);
       if (e.stderr) log.error(`stderr: ${e.stderr.trim()}`);
       if (e.stdout) log.error(`stdout: ${e.stdout.trim()}`);
@@ -109,6 +114,8 @@ export class CodexCliEngine implements ReviewEngine {
 
     const failure = events.find((e) => e.type === 'turn.failed' || e.type === 'error');
     if (failure) {
+      const limit = detectUsageLimit(this.name, failure.error?.message ?? failure.message ?? '');
+      if (limit) throw limit;
       throw new Error(`Codex returned an error: ${failure.error?.message ?? failure.message ?? 'unknown'}`);
     }
     return events;

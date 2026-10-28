@@ -6,9 +6,11 @@ vi.mock('child_process', () => ({
 }));
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'child_process';
 import { CodexCliEngine } from '../../src/engines/codex-cli.js';
+import { UsageLimitError } from '../../src/engine.js';
 
 const mockExec = vi.mocked(execFileSync);
 
@@ -98,5 +100,23 @@ describe('CodexCliEngine', () => {
     expect(new CodexCliEngine().synthesize('prompt', 'gpt-test')).toBe('Combined summary.');
     const args = mockExec.mock.calls[0][1] as string[];
     expect(args).not.toContain('--output-schema');
+  });
+
+  it('throws UsageLimitError when codex exits with a usage-limit turn failure', () => {
+    mockExec.mockImplementation(() => {
+      const err = new Error('Command failed') as Error & { stdout: string; stderr: string };
+      err.stdout = JSON.stringify({ type: 'turn.failed', error: { message: "You've hit your usage limit. Try again at 5:31 PM." } });
+      err.stderr = '';
+      throw err;
+    });
+    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow(UsageLimitError);
+  });
+
+  it('rejects JSON auth without tokens or an API key, and still cleans up its temp dir', () => {
+    const before = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('codex-review-')).length;
+    expect(() => new CodexCliEngine('{"something":"else"}').review('prompt', 'gpt-test')).toThrow(/neither tokens.access_token/);
+    const after = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('codex-review-')).length;
+    expect(after).toBe(before);
+    expect(mockExec).not.toHaveBeenCalled();
   });
 });

@@ -29,12 +29,14 @@ src/
 **GitProvider** (`src/provider.ts`):
 - `fetchPr(ref: PrRef): PrData` — get PR metadata + unified diff
 - `postReview(ref, headSha, review, comments)` — post review back to platform
+- `reportSkipped(ref, headSha, title, body)` — comment (+ neutral check run on GitHub) when no review was produced
 - Auto-detected from input: `owner/repo#123` → GitHub, `group/project!123` → GitLab
 
 **ReviewEngine** (`src/engine.ts`):
 - `review(prompt, model): BatchResult` — structured JSON review of a diff batch
 - `synthesize(prompt, model): string` — plain text summary synthesis
 - `defaultModel` — each engine knows its default (e.g. `claude-sonnet-4-6`)
+- Engines throw `UsageLimitError` (via `detectUsageLimit()`) when the agent subscription is out of quota; `index.ts` skips retries, calls `reportSkipped()`, and exits 0 on GitHub Actions / 3 elsewhere (`EXIT_USAGE_LIMIT`)
 
 ## Data Flow
 

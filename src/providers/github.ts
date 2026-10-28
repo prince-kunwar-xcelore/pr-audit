@@ -80,4 +80,48 @@ export class GitHubProvider implements GitProvider {
     log.debug(`GitHub response:\n${response}`);
     log.info(`Review posted: ${review.verdict} (${comments.length} inline comment(s))`);
   }
+
+  reportSkipped(ref: PrRef, headSha: string, title: string, body: string, dryRun = false): void {
+    const commentEndpoint = `/repos/${ref.slug}/issues/${ref.number}/comments`;
+    // Neutral check run: GitHub Actions jobs can only pass or fail, so the
+    // "skipped, not broken" status is carried by a separate check (needs `checks: write`).
+    const checkEndpoint = `/repos/${ref.slug}/check-runs`;
+    const check = {
+      name: 'AI review',
+      head_sha: headSha,
+      status: 'completed',
+      conclusion: 'neutral',
+      output: { title, summary: body },
+    };
+
+    if (dryRun) {
+      log.info(`[dry-run] Would POST ${commentEndpoint}: ${JSON.stringify({ body })}`);
+      log.info(`[dry-run] Would POST ${checkEndpoint}: ${JSON.stringify(check)}`);
+      return;
+    }
+
+    this.post(commentEndpoint, { body }, 'skip comment');
+    log.info('Posted skip comment');
+    try {
+      this.post(checkEndpoint, check, 'neutral check run');
+      log.info('Created neutral "AI review" check run');
+    } catch {
+      log.warn('[warn] Could not create a neutral check run — grant the workflow `checks: write`');
+    }
+  }
+
+  private post(endpoint: string, payload: object, label: string): void {
+    try {
+      execSync(`gh api --method POST ${endpoint} --input -`, {
+        input: Buffer.from(JSON.stringify(payload)),
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException & { stderr?: string };
+      log.error(`GitHub API error (${label}): ${e.message}`);
+      if (e.stderr) log.error(`stderr: ${e.stderr.trim()}`);
+      throw err;
+    }
+  }
 }

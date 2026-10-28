@@ -31,6 +31,7 @@ jobs:
     permissions:
       pull-requests: write
       contents: read
+      checks: write     # neutral "AI review" check when the agent's usage limit is hit
       id-token: write   # lets the job request an OIDC token for the proxy allowlist
 
     steps:
@@ -73,7 +74,8 @@ jobs:
         env:
           AGENT_GATEWAY_URL: ${{ secrets.AGENT_GATEWAY_URL }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          bun ${{ github.workspace }}/_pr-audit/src/index.ts "${{ github.event.pull_request.html_url }}" \
+          bun ${{ github.workspace }}/_pr-audit/src/index.ts "$PR_URL" \
             --engine "$REVIEW_AGENT-cli" \
             --auth-token "$(bun ${{ github.workspace }}/_agent-gateway/src/index.ts decrypt-token --agent "$REVIEW_AGENT")"
