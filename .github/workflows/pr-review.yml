@@ -42,7 +42,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: prince-kunwar-xcelore/agent-gateway
-          ref: codex-and-oidc   # TODO: drop once codex-and-oidc is merged to main
           path: _agent-gateway
 
       - name: Setup Bun
@@ -57,7 +56,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: prince-kunwar-xcelore/pr-audit
-          ref: codex-and-oidc   # TODO: drop once codex-and-oidc is merged to main
           path: _pr-audit
 
       - name: Install pr-audit deps
