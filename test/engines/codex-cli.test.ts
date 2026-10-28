@@ -76,6 +76,10 @@ describe('CodexCliEngine', () => {
 
     expect(written).toBe(auth);
     expect(fs.existsSync(codexHome)).toBe(false);
+    // auth.json must not be inside the directory the agent works in
+    const args = mockExec.mock.calls[0][1] as string[];
+    const workDir = args[args.indexOf('--cd') + 1];
+    expect(path.relative(workDir, codexHome).startsWith('..')).toBe(true);
   });
 
   it('wraps a bare API key as OPENAI_API_KEY', () => {
@@ -88,6 +92,13 @@ describe('CodexCliEngine', () => {
     new CodexCliEngine('sk-test').review('prompt', 'gpt-test');
 
     expect(JSON.parse(written)).toEqual({ OPENAI_API_KEY: 'sk-test' });
+  });
+
+  it('ignores non-fatal error events when the turn completes', () => {
+    mockExec.mockReturnValue(
+      JSON.stringify({ type: 'error', message: 'Reconnecting... 1/5' }) + '\n' + events(JSON.stringify(REVIEW)),
+    );
+    expect(new CodexCliEngine().review('prompt', 'gpt-test').review).toEqual(REVIEW);
   });
 
   it('throws when the turn fails', () => {

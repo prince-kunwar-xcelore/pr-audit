@@ -53,6 +53,9 @@ export class CodexCliEngine implements ReviewEngine {
   private run(prompt: string, model: string, schema: string | null, timeout: number): CodexEvent[] {
     // Empty, read-only working dir: the diff is in the prompt, the agent has nothing to explore.
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-review-'));
+    // Credentials live in a separate dir, outside what the agent can browse — a prompt
+    // injection in the diff must not be able to read them back into the review.
+    const codexHome = this.authToken ? fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-')) : null;
     let raw: string;
     try {
       const args = [
@@ -74,9 +77,8 @@ export class CodexCliEngine implements ReviewEngine {
       args.push('-');
 
       const env = { ...process.env };
-      if (this.authToken) {
-        const codexHome = path.join(workDir, '.codex');
-        fs.mkdirSync(codexHome, { mode: 0o700 });
+      if (codexHome) {
+        fs.chmodSync(codexHome, 0o700);
         fs.writeFileSync(path.join(codexHome, 'auth.json'), authJson(this.authToken), { mode: 0o600 });
         env.CODEX_HOME = codexHome;
       }
@@ -100,6 +102,7 @@ export class CodexCliEngine implements ReviewEngine {
       throw err;
     } finally {
       fs.rmSync(workDir, { recursive: true, force: true });
+      if (codexHome) fs.rmSync(codexHome, { recursive: true, force: true });
     }
 
     log.debug(`Codex raw events:\n${raw.trim()}`);
@@ -114,7 +117,8 @@ export class CodexCliEngine implements ReviewEngine {
       }
     }
 
-    const failure = events.find((e) => e.type === 'turn.failed' || e.type === 'error');
+    // Only a failed turn is fatal; standalone `error` events can be transient (e.g. a retried stream)
+    const failure = events.find((e) => e.type === 'turn.failed');
     if (failure) {
       const limit = detectUsageLimit(this.name, failure.error?.message ?? failure.message ?? '');
       if (limit) throw limit;
@@ -126,7 +130,10 @@ export class CodexCliEngine implements ReviewEngine {
   private lastMessage(events: CodexEvent[]): string {
     const messages = events.filter((e) => e.type === 'item.completed' && e.item?.type === 'agent_message');
     const text = messages.at(-1)?.item?.text;
-    if (text === undefined) throw new Error('Codex produced no agent message');
+    if (text === undefined) {
+      const lastError = events.filter((e) => e.type === 'error').at(-1)?.message;
+      throw new Error(`Codex produced no agent message${lastError ? ` (last error: ${lastError})` : ''}`);
+    }
     return text;
   }
 
