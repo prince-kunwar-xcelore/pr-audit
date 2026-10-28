@@ -24,6 +24,7 @@ const DEFAULT_USAGE: TokenUsage = {
 export class MockEngine implements ReviewEngine {
   readonly name = 'Mock';
   readonly defaultModel = 'mock-model';
+  readonly effort = 'medium';
   readonly calls: MockCall[] = [];
 
   constructor(

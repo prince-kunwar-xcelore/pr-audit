@@ -106,6 +106,13 @@ export class GitLabProvider implements GitProvider {
     log.info(`${prefix}: ${review.verdict} (${comments.length} inline comment(s))`);
   }
 
+  reportSkipped(ref: PrRef, _headSha: string, _title: string, body: string, dryRun = false): void {
+    // GitLab's neutral equivalent is the job's allow_failure exit code; here just leave a note
+    const mrPath = `projects/${encodeURIComponent(ref.slug)}/merge_requests/${ref.number}`;
+    this.callApi(`${mrPath}/notes`, { body }, 'skip note', dryRun);
+    log.info(`${dryRun ? '[dry-run] Skip note NOT posted' : 'Posted skip note'}`);
+  }
+
   private callApi(endpoint: string, payload: object, label: string, dryRun: boolean): void {
     log.debug(`glab api POST ${endpoint} payload:\n${JSON.stringify(payload, null, 2)}`);
 

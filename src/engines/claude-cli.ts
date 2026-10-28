@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { ReviewEngine } from '../engine.js';
+import { detectUsageLimit, type ReviewEngine } from '../engine.js';
 import type { ReviewOutput, TokenUsage, BatchResult } from '../types.js';
 import { OUTPUT_SCHEMA } from '../claude.js';
 import { log } from '../logger.js';
@@ -56,9 +56,9 @@ function makeTempHome(credentialsOrToken: string): string {
 
 export class ClaudeCliEngine implements ReviewEngine {
   readonly name = 'Claude CLI';
-  readonly defaultModel = 'claude-sonnet-4-6';
+  readonly defaultModel = 'claude-sonnet-5-5';
 
-  constructor(private authToken = '') {}
+  constructor(private authToken = '', readonly effort = 'medium') {}
 
   private buildEnv(): { env: NodeJS.ProcessEnv; tempHome: string | null } {
     if (!this.authToken) return { env: process.env, tempHome: null };
@@ -77,7 +77,7 @@ export class ClaudeCliEngine implements ReviewEngine {
     let raw: string;
     try {
       raw = execSync(
-        `claude -p --model ${model} --output-format json --json-schema '${OUTPUT_SCHEMA}'`,
+        `claude -p --model ${model} --effort ${this.effort} --output-format json --json-schema '${OUTPUT_SCHEMA}'`,
         {
           input: prompt,
           encoding: 'utf8',
@@ -89,6 +89,8 @@ export class ClaudeCliEngine implements ReviewEngine {
       );
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
+      const limit = detectUsageLimit(this.name, `${e.stdout ?? ''}\n${e.stderr ?? ''}`);
+      if (limit) throw limit;
       log.error(`claude CLI error: ${e.message}`);
       if (e.stderr) log.error(`stderr: ${e.stderr.trim()}`);
       if (e.stdout) log.error(`stdout: ${e.stdout.trim()}`);
@@ -109,6 +111,8 @@ export class ClaudeCliEngine implements ReviewEngine {
     }
 
     if (envelope.is_error) {
+      const limit = detectUsageLimit(this.name, envelope.result);
+      if (limit) throw limit;
       throw new Error(`Claude returned an error: ${envelope.result}`);
     }
 
@@ -147,7 +151,7 @@ export class ClaudeCliEngine implements ReviewEngine {
     const { env, tempHome } = this.buildEnv();
     let raw: string;
     try {
-      raw = execSync(`claude -p --model ${model}`, {
+      raw = execSync(`claude -p --model ${model} --effort ${this.effort}`, {
         input: prompt,
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -157,6 +161,8 @@ export class ClaudeCliEngine implements ReviewEngine {
       });
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
+      const limit = detectUsageLimit(this.name, `${e.stdout ?? ''}\n${e.stderr ?? ''}`);
+      if (limit) throw limit;
       log.error(`claude CLI error (synthesis): ${e.message}`);
       if (e.stderr) log.error(`stderr: ${e.stderr.trim()}`);
       throw err;
