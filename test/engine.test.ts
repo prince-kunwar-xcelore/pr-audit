@@ -8,6 +8,11 @@ describe('resolveEngine', () => {
     expect(engine.name).toBe('Claude CLI');
   });
 
+  it('resolves codex-cli engine', () => {
+    const engine = resolveEngine('codex-cli');
+    expect(engine.name).toBe('Codex CLI');
+  });
+
   it('throws on unknown engine', () => {
     expect(() => resolveEngine('unknown-engine')).toThrow('Unsupported engine');
   });

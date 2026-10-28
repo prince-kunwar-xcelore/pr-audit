@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   const dryRun = args.includes('--dry-run');
 
   if (model && !engineName) {
-    console.error('Error: --model requires --engine. Supported engines: claude-cli');
+    console.error('Error: --model requires --engine. Supported engines: claude-cli, codex-cli');
     process.exit(1);
   }
 
@@ -64,7 +64,7 @@ async function main(): Promise<void> {
       '  GitHub:  owner/repo#123  or  https://github.com/owner/repo/pull/123\n' +
       '  GitLab:  group/project!123  or  https://gitlab.com/group/project/-/merge_requests/123\n' +
       '\n' +
-      'Engines: claude-cli (default)',
+      'Engines: claude-cli (default), codex-cli',
     );
     process.exit(1);
   }

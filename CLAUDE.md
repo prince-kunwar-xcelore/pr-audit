@@ -18,6 +18,7 @@ src/
     gitlab.ts           GitLabProvider — fetches via `glab` CLI, posts discussions/notes/approve via GitLab API
   engines/
     claude-cli.ts       ClaudeCliEngine — calls `claude -p` CLI
+    codex-cli.ts        CodexCliEngine — calls `codex exec --json --output-schema` CLI
     mock.ts             MockEngine — canned responses for testing
   mocks/
     provider.ts         MockProvider — canned PR data for testing
@@ -54,9 +55,9 @@ parseArgs → resolveProvider + resolveEngine
 pr-audit <ref> [--engine <engine>] [--model <model>] [--auth-token <token>] [--provider <provider>] [--dry-run]
 ```
 
-- `--engine`: Review engine (default: `claude-cli`). Required if `--model` is set.
+- `--engine`: Review engine — `claude-cli` (default) or `codex-cli`. Required if `--model` is set.
 - `--model`: Model override. Uses engine's `defaultModel` if omitted.
-- `--auth-token`: Auth token passed to the engine (e.g. Claude CLI credentials).
+- `--auth-token`: Auth token passed to the engine — `claude-cli`: Claude credentials JSON or OAuth access token; `codex-cli`: contents of `~/.codex/auth.json` or an OpenAI API key.
 - `--provider`: Explicit git provider override (default: auto-detected from input).
 - `--dry-run`: Run the review but log the would-be API payload instead of posting. Providers must honor the `dryRun` flag in `postReview()`.
 
@@ -66,7 +67,7 @@ pr-audit <ref> [--engine <engine>] [--model <model>] [--auth-token <token>] [--p
 - pnpm, compiled with tsc to `dist/`
 - Runtime dependency: `parse-diff`
 - Testing: `vitest`
-- External CLIs: `gh` (GitHub), `glab` (GitLab), `claude` (Claude Code)
+- External CLIs: `gh` (GitHub), `glab` (GitLab), `claude` (Claude Code), `codex` (Codex CLI)
 
 ## Build & Run
 
