@@ -71,6 +71,18 @@ export class GitHubProvider implements GitProvider {
       });
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
+      // Repos (and orgs) can forbid GitHub Actions from approving PRs; post the approval as a comment review instead
+      if (review.verdict === 'APPROVE' && /not permitted to approve/i.test(`${e.stdout ?? ''}${e.stderr ?? ''}`)) {
+        log.warn('[warn] GitHub Actions may not approve PRs in this repo — posting the review as COMMENT');
+        this.postReview(
+          ref,
+          headSha,
+          { ...review, verdict: 'COMMENT', summary: `✅ **Approved by AI review** (posted as a comment: GitHub Actions can't approve PRs in this repo).\n\n${review.summary}` },
+          comments,
+          dryRun,
+        );
+        return;
+      }
       log.error(`GitHub API error: ${e.message}`);
       if (e.stderr) log.error(`stderr: ${e.stderr.trim()}`);
       if (e.stdout) log.error(`stdout: ${e.stdout.trim()}`);

@@ -40,3 +40,32 @@ describe('GitHubProvider.reportSkipped', () => {
     expect(mockExec).not.toHaveBeenCalled();
   });
 });
+
+describe('GitHubProvider.postReview', () => {
+  beforeEach(() => {
+    mockExec.mockReset();
+  });
+
+  it('falls back to a COMMENT review when Actions may not approve', () => {
+    mockExec
+      .mockImplementationOnce(() => {
+        const err = new Error('Command failed') as Error & { stdout: string };
+        err.stdout = '{"message":"Unprocessable Entity","errors":["GitHub Actions is not permitted to approve pull requests."]}';
+        throw err;
+      })
+      .mockReturnValueOnce('{}');
+
+    new GitHubProvider().postReview(ref, 'sha1', { summary: 'LGTM', verdict: 'APPROVE', comments: [] }, []);
+
+    expect(mockExec).toHaveBeenCalledTimes(2);
+    const retry = payload(mockExec.mock.calls[1]);
+    expect(retry.event).toBe('COMMENT');
+    expect(retry.body).toMatch(/Approved by AI review[\s\S]*LGTM/);
+  });
+
+  it('does not retry other failures', () => {
+    mockExec.mockImplementationOnce(() => { throw Object.assign(new Error('boom'), { stdout: '{"message":"Not Found"}' }); });
+    expect(() => new GitHubProvider().postReview(ref, 'sha1', { summary: 's', verdict: 'APPROVE', comments: [] }, [])).toThrow('boom');
+    expect(mockExec).toHaveBeenCalledTimes(1);
+  });
+});
