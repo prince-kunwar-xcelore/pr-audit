@@ -46,6 +46,7 @@ describe('CodexCliEngine', () => {
     const [cmd, args, opts] = mockExec.mock.calls[0] as [string, string[], { input: string; env: NodeJS.ProcessEnv }];
     expect(cmd).toBe('codex');
     expect(args).toEqual(expect.arrayContaining(['exec', '--model', 'gpt-test', '--json', '--sandbox', 'read-only']));
+    expect(args[args.indexOf('-c') + 1]).toBe('model_reasoning_effort="medium"');
     expect(opts.input).toBe('prompt');
     expect(opts.env.CODEX_HOME).toBe(process.env.CODEX_HOME);
     expect(schema?.additionalProperties).toBe(false);

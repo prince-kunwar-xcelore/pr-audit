@@ -56,7 +56,9 @@ function makeTempHome(credentialsOrToken: string): string {
 
 export class ClaudeCliEngine implements ReviewEngine {
   readonly name = 'Claude CLI';
-  readonly defaultModel = 'claude-sonnet-4-6';
+  readonly defaultModel = 'claude-sonnet-5-5';
+  /** Reasoning effort for every call (`claude --effort`). */
+  readonly effort = 'medium';
 
   constructor(private authToken = '') {}
 
@@ -77,7 +79,7 @@ export class ClaudeCliEngine implements ReviewEngine {
     let raw: string;
     try {
       raw = execSync(
-        `claude -p --model ${model} --output-format json --json-schema '${OUTPUT_SCHEMA}'`,
+        `claude -p --model ${model} --effort ${this.effort} --output-format json --json-schema '${OUTPUT_SCHEMA}'`,
         {
           input: prompt,
           encoding: 'utf8',
@@ -151,7 +153,7 @@ export class ClaudeCliEngine implements ReviewEngine {
     const { env, tempHome } = this.buildEnv();
     let raw: string;
     try {
-      raw = execSync(`claude -p --model ${model}`, {
+      raw = execSync(`claude -p --model ${model} --effort ${this.effort}`, {
         input: prompt,
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],

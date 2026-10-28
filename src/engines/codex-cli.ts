@@ -46,6 +46,8 @@ function authJson(credentialsOrKey: string): string {
 export class CodexCliEngine implements ReviewEngine {
   readonly name = 'Codex CLI';
   readonly defaultModel = 'gpt-6.1-sol';
+  /** Reasoning effort for every call; set explicitly since user config is ignored. */
+  readonly effort = 'medium';
 
   constructor(private authToken = '') {}
 
@@ -57,6 +59,7 @@ export class CodexCliEngine implements ReviewEngine {
       const args = [
         'exec',
         '--model', model,
+        '-c', `model_reasoning_effort="${this.effort}"`,
         '--json',
         '--ephemeral',
         '--skip-git-repo-check',

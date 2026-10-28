@@ -45,7 +45,7 @@ pr-audit owner/repo#123 --dry-run                                     # log payl
 ```
 
 - **Provider** is auto-detected from the input format (`#` → GitHub, `!` → GitLab, URL hostname). Use `--provider` to override (e.g. self-hosted instances).
-- **Engine** defaults to `claude-cli` with model `claude-sonnet-4-6`; `codex-cli` defaults to `gpt-6.1-sol`. Use `--engine` to select an engine; `--model` requires `--engine`.
+- **Engine** defaults to `claude-cli` with model `claude-sonnet-5-5`; `codex-cli` defaults to `gpt-6.1-sol`. Both run at **medium** reasoning effort. Use `--engine` to select an engine; `--model` requires `--engine`.
 - **Codex** runs `codex exec` in an empty read-only sandbox with your user config ignored, so local MCP servers/hooks don't leak into reviews. It reports token usage but no dollar cost (subscription-billed).
 - **Dry-run** runs the full review (you still pay for Claude tokens) but skips the final post — useful for previewing what would be sent before committing to it.
 
