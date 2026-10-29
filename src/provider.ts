@@ -1,4 +1,5 @@
 import type { PrRef, PrData, ReviewComment, ReviewOutput } from './types.js';
+import type { ReviewHistory } from './review-history.js';
 import { GitHubProvider } from './providers/github.js';
 import { GitLabProvider } from './providers/gitlab.js';
 
@@ -20,6 +21,14 @@ export interface GitProvider {
    * a plain comment, plus a neutral status where the platform supports one.
    */
   reportSkipped(ref: PrRef, headSha: string, title: string, body: string, dryRun?: boolean): void;
+
+  /**
+   * Incremental reviews (optional; providers without them always review the full diff):
+   * what earlier pr-audit reviews covered and commented, and the diff since then.
+   */
+  fetchReviewHistory?(ref: PrRef): ReviewHistory;
+  /** Unified diff `fromSha..headSha`, or null when fromSha isn't an ancestor of headSha (e.g. after a force-push). */
+  fetchDiffSince?(ref: PrRef, fromSha: string, headSha: string): string | null;
 }
 
 interface ResolvedProvider {

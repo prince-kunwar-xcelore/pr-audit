@@ -2,6 +2,26 @@ import { execFileSync } from 'child_process';
 import type { GitProvider } from '../provider.js';
 import type { PrRef, PrData, ReviewComment, ReviewOutput } from '../types.js';
 import { log } from '../logger.js';
+import { isPrAuditComment, parseReviewMarker, type PriorThread, type ReviewHistory } from '../review-history.js';
+
+interface GitHubReviewComment {
+  id: number;
+  in_reply_to_id?: number;
+  path: string;
+  line: number | null;
+  original_line: number | null;
+  body: string;
+  user: { login: string } | null;
+}
+
+/** `gh api --paginate` over a list endpoint, one JSON object per line (works without --slurp). */
+function listAll<T>(endpoint: string): T[] {
+  const out = execFileSync('gh', ['api', '--paginate', endpoint, '--jq', '.[] | tojson'], {
+    encoding: 'utf8',
+    maxBuffer: 50 * 1024 * 1024,
+  });
+  return out.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as T);
+}
 
 export class GitHubProvider implements GitProvider {
   readonly name = 'GitHub';
@@ -92,6 +112,59 @@ export class GitHubProvider implements GitProvider {
 
     log.debug(`GitHub response:\n${response}`);
     log.info(`Review posted: ${review.verdict} (${comments.length} inline comment(s))`);
+  }
+
+  fetchReviewHistory(ref: PrRef): ReviewHistory {
+    const base = `repos/${ref.slug}/pulls/${ref.number}`;
+
+    const reviews = listAll<{ body: string | null }>(`${base}/reviews`);
+    let lastSha: string | null = null;
+    for (const r of reviews) lastSha = parseReviewMarker(r.body) ?? lastSha;
+
+    const comments = listAll<GitHubReviewComment>(`${base}/comments`);
+    const threads = new Map<number, PriorThread>();
+    for (const c of comments) {
+      if (!c.in_reply_to_id && isPrAuditComment(c.body)) {
+        threads.set(c.id, { path: c.path, line: c.line ?? c.original_line, body: c.body, replies: [] });
+      }
+    }
+    for (const c of comments) {
+      const thread = c.in_reply_to_id ? threads.get(c.in_reply_to_id) : undefined;
+      thread?.replies.push({ author: c.user?.login ?? 'unknown', body: c.body });
+    }
+
+    log.debug(`Review history: last reviewed ${lastSha ?? '(none)'}, ${threads.size} earlier pr-audit thread(s)`);
+    return { lastSha, threads: [...threads.values()] };
+  }
+
+  fetchDiffSince(ref: PrRef, fromSha: string, headSha: string): string | null {
+    const endpoint = `repos/${ref.slug}/compare/${fromSha}...${headSha}`;
+    let status: string;
+    try {
+      status = execFileSync('gh', ['api', endpoint, '--jq', '.status'], {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+    } catch (err) {
+      // 404 once the old commit is gone (force-push + GC)
+      log.debug(`compare ${fromSha}...${headSha} failed: ${(err as Error).message}`);
+      return null;
+    }
+    // "ahead": fromSha is an ancestor of head. "diverged"/"behind": history was rewritten.
+    if (status !== 'ahead' && status !== 'identical') {
+      log.debug(`compare ${fromSha}...${headSha}: ${status}`);
+      return null;
+    }
+    try {
+      return execFileSync('gh', ['api', '-H', 'Accept: application/vnd.github.diff', endpoint], {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 50 * 1024 * 1024,
+      });
+    } catch (err) {
+      log.warn(`[warn] Could not fetch the diff since ${fromSha.slice(0, 7)}: ${(err as Error).message}`);
+      return null;
+    }
   }
 
   reportSkipped(ref: PrRef, headSha: string, title: string, body: string, dryRun = false): void {
