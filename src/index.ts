@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import process from 'node:process';
 import { resolveProvider, type GitProvider } from './provider.js';
-import type { PrRef, ReviewOutput, TokenUsage } from './types.js';
+import type { ParsedFile, PrRef, ReviewOutput, TokenUsage } from './types.js';
 import fs from 'node:fs';
 import { resolveEngine, AgentAuthError, UsageLimitError, DEFAULT_EFFORT, ENGINE_EFFORTS } from './engine.js';
 import { parseDiffString, chunkFiles, validateComments } from './diff.js';
 import { buildPrompt, buildSynthesisPrompt, mergeResults } from './claude.js';
 import { initLogger, log } from './logger.js';
+import { reviewMarker, type ReviewHistory } from './review-history.js';
 import { readAuthToken, redactArgs, AUTH_TOKEN_ENV } from './auth-token.js';
 
 async function sleep(ms: number): Promise<void> {
@@ -94,6 +95,7 @@ async function main(): Promise<void> {
   const providerHint = parseFlag(args, '--provider');
   const effort = parseFlag(args, '--effort');
   const dryRun = args.includes('--dry-run');
+  const fullReview = args.includes('--full');
 
   if (model && !engineName) {
     console.error('Error: --model requires --engine. Supported engines: claude-cli, codex-cli');
@@ -101,12 +103,12 @@ async function main(): Promise<void> {
   }
 
   const skipIdxs = flagIndices(args, '--engine', '--model', '--auth-token', '--auth-token-file', '--provider', '--effort');
-  const positional = args.filter((a, i) => !skipIdxs.has(i) && a !== '--dry-run');
+  const positional = args.filter((a, i) => !skipIdxs.has(i) && a !== '--dry-run' && a !== '--full');
   const arg = positional[0];
 
   if (!arg) {
     console.error(
-      'Usage: pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider github|gitlab] [--dry-run]\n' +
+      'Usage: pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider github|gitlab] [--full] [--dry-run]\n' +
       '\n' +
       'Supported formats:\n' +
       '  GitHub:  owner/repo#123  or  https://github.com/owner/repo/pull/123\n' +
@@ -142,12 +144,45 @@ async function main(): Promise<void> {
   log.debug(`  Body: ${prData.body.slice(0, 300)}${prData.body.length > 300 ? '…' : ''}`);
   log.debug(`  headSha: ${prData.headSha}`);
 
-  const files = parseDiffString(prData.diff);
-  if (files.length === 0) {
+  const prFiles = parseDiffString(prData.diff);
+  if (prFiles.length === 0) {
     log.info('No reviewable files found in diff. Exiting.');
     await log.close();
     process.exit(0);
   }
+
+  // Incremental review: only what changed since the last pr-audit review, unless --full
+  let history: ReviewHistory = { lastSha: null, threads: [] };
+  try {
+    if (provider.fetchReviewHistory) history = provider.fetchReviewHistory(ref);
+  } catch (err) {
+    log.warn(`[warn] Could not read earlier reviews — reviewing the full diff (${(err as Error).message})`);
+  }
+  let files: ParsedFile[] = prFiles;
+  let sinceSha: string | undefined;
+  if (!fullReview && history.lastSha === prData.headSha) {
+    log.info(`Commit ${prData.headSha.slice(0, 7)} was already reviewed (use --full to review it again). Exiting.`);
+    await log.close();
+    process.exit(0);
+  }
+  if (!fullReview && history.lastSha && provider.fetchDiffSince) {
+    const since = provider.fetchDiffSince(ref, history.lastSha, prData.headSha);
+    if (since === null) {
+      log.info(`  Last reviewed commit ${history.lastSha.slice(0, 7)} is not in this branch's history (force-push?) — reviewing the full diff`);
+    } else {
+      // Files outside the PR's own diff (e.g. from merging the base branch in) aren't the PR's changes
+      const prPaths = new Set(prFiles.map((f) => f.path));
+      files = parseDiffString(since).filter((f) => prPaths.has(f.path));
+      sinceSha = history.lastSha;
+      log.info(`  Incremental: changes since last reviewed commit ${sinceSha.slice(0, 7)}`);
+      if (files.length === 0) {
+        log.info('No reviewable changes since the last review. Exiting.');
+        await log.close();
+        process.exit(0);
+      }
+    }
+  }
+  if (history.threads.length) log.info(`  Earlier pr-audit threads: ${history.threads.length}`);
   log.info(`  Files to review: ${files.length}`);
   log.debug(`  Files: ${files.map((f) => f.path).join(', ')}`);
 
@@ -172,7 +207,7 @@ async function main(): Promise<void> {
       log.info(`Reviewing batch ${i + 1}/${batches.length} (${totalChanged} changed lines)...`);
       log.debug(`  Files in batch: ${batch.map((f) => `${f.path} (${f.changedLineCount} lines)`).join(', ')}`);
 
-      const prompt = buildPrompt(prData, batch, provider.reviewTerm);
+      const prompt = buildPrompt(prData, batch, provider.reviewTerm, { sinceSha, priorThreads: history.threads });
       const result = await withRetry(
         () => engine.review(prompt, effectiveModel),
         3,
@@ -220,10 +255,17 @@ async function main(): Promise<void> {
     log.info(totalLine);
   }
 
-  const validComments = validateComments(merged.comments, files);
+  // Lines must be in the reviewed diff and in the PR's own diff (the platform rejects anything else)
+  const validComments = validateComments(validateComments(merged.comments, files), prFiles);
   if (validComments.length < merged.comments.length) {
     log.warn(`[warn] Dropped ${merged.comments.length - validComments.length} comment(s) with invalid line refs`);
   }
+
+  if (sinceSha) {
+    merged.summary = `_Incremental review: changes since ${sinceSha.slice(0, 7)}._\n\n${merged.summary}`;
+  }
+  // Recorded so the next run can review only what's pushed after this commit
+  merged.summary = `${merged.summary}\n\n${reviewMarker(prData.headSha)}`;
 
   log.section(dryRun ? 'DRY-RUN: REVIEW PREVIEW' : 'POSTING REVIEW');
   log.info(`${dryRun ? 'Previewing' : 'Posting'} review (${merged.verdict})...`);

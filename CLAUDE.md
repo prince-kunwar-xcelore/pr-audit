@@ -13,6 +13,7 @@ src/
   auth-token.ts         Credentials from --auth-token / --auth-token-file / env; argv redaction for logs
   claude.ts             Prompt building (buildPrompt, buildSynthesisPrompt) + mergeResults
   diff.ts               Unified diff parsing, file filtering, chunking, comment validation
+  review-history.ts     Incremental reviews: SHA marker, earlier pr-audit threads, prompt rendering
   logger.ts             Dual-stream logging (console + file)
   providers/
     github.ts           GitHubProvider — fetches via `gh` CLI, posts via GitHub API
@@ -31,6 +32,7 @@ src/
 - `fetchPr(ref: PrRef): PrData` — get PR metadata + unified diff
 - `postReview(ref, headSha, review, comments)` — post review back to platform
 - `reportSkipped(ref, headSha, title, body)` — comment (+ neutral check run on GitHub) when no review was produced
+- optional `fetchReviewHistory(ref)` / `fetchDiffSince(ref, fromSha, headSha)` — incremental reviews (GitHub only; providers without them get full reviews)
 - Auto-detected from input: `owner/repo#123` → GitHub, `group/project!123` → GitLab
 
 **ReviewEngine** (`src/engine.ts`):
@@ -45,19 +47,20 @@ src/
 
 ```
 parseArgs → resolveProvider + resolveEngine
-  → provider.fetchPr()
-  → parseDiffString() → chunkFiles()
-  → for each batch: buildPrompt() → engine.review()
+  → provider.fetchPr() → parseDiffString()  (prFiles: the whole PR)
+  → provider.fetchReviewHistory?() → fetchDiffSince?(lastSha)  (files: only new changes, unless --full)
+  → chunkFiles()
+  → for each batch: buildPrompt(…, { sinceSha, priorThreads }) → engine.review()
   → mergeResults()
   → if multi-batch: buildSynthesisPrompt() → engine.synthesize()
-  → validateComments()
-  → provider.postReview()
+  → validateComments() against files, then prFiles
+  → append reviewMarker(headSha) to the summary → provider.postReview()
 ```
 
 ## CLI Flags
 
 ```
-pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider <provider>] [--dry-run]
+pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider <provider>] [--full] [--dry-run]
 ```
 
 - `--engine`: Review engine — `claude-cli` (default) or `codex-cli`. Required if `--model` is set.
@@ -65,6 +68,7 @@ pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-
 - `--effort`: Reasoning effort (default `medium`), validated per engine against `ENGINE_EFFORTS` in `src/engine.ts`.
 - `--auth-token` / `--auth-token-file` / `$PR_AUDIT_AUTH_TOKEN` (that precedence, see `src/auth-token.ts`): Auth token passed to the engine — `claude-cli`: Claude credentials JSON or OAuth access token; `codex-cli`: contents of `~/.codex/auth.json` or an OpenAI API key. Empty-but-given is an error; the `--auth-token` value is redacted from the logged command line.
 - `--provider`: Explicit git provider override (default: auto-detected from input).
+- `--full`: Review the whole PR even if an earlier pr-audit review exists (default: only changes since the commit in the last review's `<!-- pr-audit:sha=… -->` marker; GitHub only).
 - `--dry-run`: Run the review but log the would-be API payload instead of posting. Providers must honor the `dryRun` flag in `postReview()`.
 
 ## Tech Stack

@@ -21,6 +21,25 @@ const SIMPLE_DIFF = `diff --git a/file.ts b/file.ts
 `;
 
 describe('buildPrompt', () => {
+  it('has no incremental or already-discussed sections by default', () => {
+    const prompt = buildPrompt(PR_DATA, parseDiffString(SIMPLE_DIFF), 'pull request');
+    expect(prompt).not.toContain('since the last review');
+    expect(prompt).not.toContain('Already discussed');
+  });
+
+  it('describes an incremental diff and lists earlier threads on the batch files only', () => {
+    const prompt = buildPrompt(PR_DATA, parseDiffString(SIMPLE_DIFF), 'pull request', {
+      sinceSha: '0123456789abcdef',
+      priorThreads: [
+        { path: 'file.ts', line: 2, body: '**[warning]** b is unused', replies: [{ author: 'dev', body: 'Intended, used later' }] },
+        { path: 'other.ts', line: 1, body: '**[critical]** elsewhere', replies: [] },
+      ],
+    });
+    expect(prompt).toContain('only the changes pushed since the last review (commit 0123456)');
+    expect(prompt).toContain('- file.ts:2 **[warning]** b is unused\n    ↳ dev: Intended, used later');
+    expect(prompt).not.toContain('elsewhere');
+  });
+
   it('includes PR title and description', () => {
     const files = parseDiffString(SIMPLE_DIFF);
     const prompt = buildPrompt(PR_DATA, files, 'pull request');

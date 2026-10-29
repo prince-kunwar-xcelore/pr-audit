@@ -89,3 +89,49 @@ describe('GitHubProvider.fetchPr', () => {
     expect(mockExec.mock.calls[1][1]).toEqual(['pr', 'diff', '7', '--repo', 'owner/repo;touch pwned']);
   });
 });
+
+describe('GitHubProvider review history', () => {
+  beforeEach(() => {
+    mockExec.mockReset();
+  });
+
+  const ndjson = (items: object[]) => items.map((i) => JSON.stringify(i)).join('\n');
+
+  it('takes the latest marker and groups replies under pr-audit threads', () => {
+    mockExec
+      .mockReturnValueOnce(ndjson([
+        { body: 'old <!-- pr-audit:sha=aaaaaaa -->' },
+        { body: 'a human review' },
+        { body: 'new <!-- pr-audit:sha=bbbbbbb -->' },
+      ]))
+      .mockReturnValueOnce(ndjson([
+        { id: 1, path: 'a.ts', line: 3, original_line: 3, body: '**[warning]** w', user: { login: 'github-actions[bot]' } },
+        { id: 2, in_reply_to_id: 1, path: 'a.ts', line: 3, original_line: 3, body: 'fixed', user: { login: 'dev' } },
+        { id: 3, path: 'b.ts', line: null, original_line: 9, body: '**[critical]** c', user: { login: 'github-actions[bot]' } },
+        { id: 4, path: 'b.ts', line: 1, original_line: 1, body: 'a human comment', user: { login: 'dev' } },
+      ]));
+
+    const history = new GitHubProvider().fetchReviewHistory(ref);
+
+    expect(mockExec.mock.calls[0][1]).toEqual(['api', '--paginate', 'repos/owner/repo/pulls/7/reviews', '--jq', '.[] | tojson']);
+    expect(history.lastSha).toBe('bbbbbbb');
+    expect(history.threads).toEqual([
+      { path: 'a.ts', line: 3, body: '**[warning]** w', replies: [{ author: 'dev', body: 'fixed' }] },
+      { path: 'b.ts', line: 9, body: '**[critical]** c', replies: [] },
+    ]);
+  });
+
+  it('returns the compare diff when the old SHA is an ancestor', () => {
+    mockExec.mockReturnValueOnce('ahead\n').mockReturnValueOnce('diff --git a/a.ts b/a.ts');
+    expect(new GitHubProvider().fetchDiffSince(ref, 'old', 'new')).toBe('diff --git a/a.ts b/a.ts');
+    expect(mockExec.mock.calls[1][1]).toEqual(['api', '-H', 'Accept: application/vnd.github.diff', 'repos/owner/repo/compare/old...new']);
+  });
+
+  it('returns null after a force-push or when the old SHA is gone', () => {
+    mockExec.mockReturnValueOnce('diverged\n');
+    expect(new GitHubProvider().fetchDiffSince(ref, 'old', 'new')).toBeNull();
+    mockExec.mockImplementationOnce(() => { throw new Error('HTTP 404'); });
+    expect(new GitHubProvider().fetchDiffSince(ref, 'old', 'new')).toBeNull();
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+});

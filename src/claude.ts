@@ -6,6 +6,14 @@ import type {
   BatchResult,
 } from "./types.js";
 import { renderDiffForPrompt } from "./diff.js";
+import { renderPriorThreads, type PriorThread } from "./review-history.js";
+
+export interface PromptContext {
+  /** Set when the diff only covers changes since this commit (an incremental review). */
+  sinceSha?: string;
+  /** Inline threads from earlier pr-audit reviews. */
+  priorThreads?: PriorThread[];
+}
 
 function systemRules(reviewTerm: string): string {
   return `You are a senior software engineer reviewing a ${reviewTerm}.
@@ -28,15 +36,28 @@ Rules:
 - If no issues found, return an empty comments array and verdict APPROVE`;
 }
 
-export function buildPrompt(prData: PrData, files: ParsedFile[], reviewTerm: string): string {
+export function buildPrompt(
+  prData: PrData,
+  files: ParsedFile[],
+  reviewTerm: string,
+  context: PromptContext = {},
+): string {
   const diff = renderDiffForPrompt(files);
+  const prior = renderPriorThreads(context.priorThreads ?? [], files.map((f) => f.path));
+
+  const scope = context.sinceSha
+    ? `\n\nThis diff contains only the changes pushed since the last review (commit ${context.sinceSha.slice(0, 7)}); everything before that was already reviewed.`
+    : "";
+  const discussed = prior
+    ? `\n\nAlready discussed — earlier review comments on these files and the replies to them. Do not raise these points again unless the new changes reintroduce or worsen them:\n${prior}`
+    : "";
 
   return `${systemRules(reviewTerm)}
 
 PR Title: ${prData.title}
 
 PR Description:
-${prData.body || "(none)"}
+${prData.body || "(none)"}${scope}${discussed}
 
 Diff:
 ${diff}`;

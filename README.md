@@ -44,6 +44,7 @@ pr-audit owner/repo#123 --effort high                                 # more rea
 pr-audit owner/repo#123 --auth-token-file ~/.claude/.credentials.json  # explicit Claude credentials
 pr-audit owner/repo#123 --engine codex-cli --auth-token-file ~/.codex/auth.json
 pr-audit owner/repo#123 --provider github                             # explicit provider override
+pr-audit owner/repo#123 --full                                        # review the whole PR, not just new commits
 pr-audit owner/repo#123 --dry-run                                     # log payload, do not post
 ```
 
@@ -51,6 +52,7 @@ pr-audit owner/repo#123 --dry-run                                     # log payl
 - **Engine** defaults to `claude-cli` with model `claude-sonnet-5-5`; `codex-cli` defaults to `gpt-6.1-sol`. Both run at **medium** reasoning effort; override with `--effort` (claude-cli: low, medium, high, xhigh, max; codex-cli: low, medium, high, xhigh, max, ultra). Use `--engine` to select an engine; `--model` requires `--engine`.
 - **Auth**: by default each engine uses your local login. To pass credentials explicitly, use `--auth-token-file <path>` (preferred: keeps them out of the process list), `--auth-token <value>`, or the `PR_AUDIT_AUTH_TOKEN` env var, in that order of precedence. The value is, for `claude-cli`, the contents of `~/.claude/.credentials.json` or a bare OAuth access token; for `codex-cli`, the contents of `~/.codex/auth.json` or an OpenAI API key. A given-but-empty value (empty file, `--auth-token ""`, empty env var) is an error rather than a silent fallback to the local login. Credentials are written to a temporary home for the call and deleted afterwards, and the `--auth-token` value is redacted from the run log.
 - **Codex** runs `codex exec` in an empty read-only sandbox with your user config ignored, so local MCP servers and hooks don't leak into reviews. Its credentials live outside that sandbox directory, so the agent can't read them back into a review. It reports token usage but no dollar cost (subscription-billed).
+- **Incremental** (GitHub): each review records the commit it covered in a hidden `<!-- pr-audit:sha=… -->` marker. The next run reviews only the changes pushed since then, and tells the agent about the earlier pr-audit threads on those files (with replies) so it doesn't raise them again. If that commit was already reviewed, it exits without posting. After a force-push that drops the commit, or with `--full`, it reviews the whole PR (still passing the earlier threads). GitLab always reviews the full diff.
 - **Dry-run** runs the full review (it still uses your agent quota) but skips the final post. Use it to preview what would be sent.
 
 ### Exit codes
@@ -132,12 +134,13 @@ This repo reviews its own PRs this way (`.github/workflows/pr-review.yml`).
 ## How it works
 
 1. Detects the git provider from the input format and fetches PR/MR metadata + diff via the provider's CLI
-2. Filters out lock files and generated files
-3. Prints a rough cost estimate based on diff size (API-equivalent pricing; subscription runs aren't billed per call)
-4. Chunks the diff into batches (≤1000 rendered lines each), truncating files over 600 added lines with a notice so the agent knows the file is partial
-5. Sends each batch to the configured review engine with a structured JSON prompt — failed batches are retried up to 3 times with exponential backoff (usage-limit errors are not retried)
-6. Synthesizes all batch summaries into a single coherent review summary via a final engine call
-7. Posts a native review with inline comments and the synthesized summary back to the provider
+2. On GitHub, finds the last pr-audit review's commit and narrows the diff to what changed since (see **Incremental** above), and collects earlier pr-audit threads for the prompt
+3. Filters out lock files and generated files
+4. Prints a rough cost estimate based on diff size (API-equivalent pricing; subscription runs aren't billed per call)
+5. Chunks the diff into batches (≤1000 rendered lines each), truncating files over 600 added lines with a notice so the agent knows the file is partial
+6. Sends each batch to the configured review engine with a structured JSON prompt — failed batches are retried up to 3 times with exponential backoff (usage-limit errors are not retried)
+7. Synthesizes all batch summaries into a single coherent review summary via a final engine call
+8. Posts a native review with inline comments (only on lines in both the reviewed diff and the PR diff) and the synthesized summary, ending with the commit marker
 
 ## Run logs
 
