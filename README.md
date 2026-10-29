@@ -66,7 +66,8 @@ pr-audit owner/repo#123 --dry-run                                     # log payl
 ## When the agent's usage limit is hit
 
 Subscription quotas reset after hours, so pr-audit doesn't retry or fail the review. It stops at the
-first quota error (Codex: "You've hit your usage limit…", Claude: "usage limit reached"), then:
+first quota error (Codex: "You've hit your usage limit…"; Claude: "usage limit reached", "You've hit
+your 5-hour limit · resets …", or the weekly limit), then:
 
 - comments on the PR/MR: review skipped, with the reset time when the agent states one;
 - **GitHub**: creates a neutral **AI review** check run on the head commit (needs `checks: write`),
@@ -74,7 +75,7 @@ first quota error (Codex: "You've hit your usage limit…", Claude: "usage limit
 - **elsewhere** (GitLab, local): exits `3`. In GitLab CI, `allow_failure: exit_codes: 3` shows the job
   as "passed with warnings".
 
-Transient errors (HTTP 429, "model at capacity") are still retried.
+Transient errors (HTTP 429, "hit your rate limit", "model at capacity") are still retried.
 
 ## When the agent's credentials are rejected
 
@@ -129,7 +130,13 @@ permissions:
 The credentials never appear in a command line, and if `decrypt-token` fails the job stops at that
 step with its real error instead of reviewing with an empty token.
 
-This repo reviews its own PRs this way (`.github/workflows/pr-review.yml`). PRs from forks are skipped there: they get no secrets, no OIDC token and a read-only `GITHUB_TOKEN`.
+The templates check out agent-gateway and pr-audit at pinned commits (the `# pin: … main` lines), so a push to
+either tool doesn't change what runs with your credentials. To move the pins to the current `main`, run
+agent-gateway's `scripts/pin-review-tools.sh <workflow files…>` and commit the result.
+
+This repo reviews its own PRs this way (`.github/workflows/pr-review.yml`), with pr-audit itself pinned too, so a PR
+is never reviewed by its own unreviewed code. PRs from forks are skipped there: they get no secrets, no OIDC token
+and a read-only `GITHUB_TOKEN`.
 
 ## How it works
 
@@ -138,9 +145,10 @@ This repo reviews its own PRs this way (`.github/workflows/pr-review.yml`). PRs 
 3. Filters out lock files and generated files
 4. Prints a rough cost estimate based on diff size (API-equivalent pricing; subscription runs aren't billed per call)
 5. Chunks the diff into batches (≤1000 rendered lines each), truncating files over 600 added lines with a notice so the agent knows the file is partial
-6. Sends each batch to the configured review engine with a structured JSON prompt — failed batches are retried up to 3 times with exponential backoff (usage-limit errors are not retried)
+6. Sends each batch to the configured review engine with a structured JSON prompt — failed batches are retried up to 3 times with exponential backoff (usage-limit and authentication errors are not retried)
 7. Synthesizes all batch summaries into a single coherent review summary via a final engine call
-8. Posts a native review with inline comments (only on lines in both the reviewed diff and the PR diff) and the synthesized summary, ending with the commit marker
+8. Holds the verdict while earlier critical / warning threads are still open on unchanged lines (see **Incremental** above)
+9. Posts a native review with inline comments (only on lines in both the reviewed diff and the PR diff) and the synthesized summary, ending with the commit marker
 
 ## Run logs
 
@@ -176,3 +184,5 @@ pnpm build                # compile to dist/
 pnpm test                 # run tests
 pnpm test:watch           # watch mode
 ```
+
+See [CLAUDE.md](CLAUDE.md) for the source layout and the provider / engine interfaces.
