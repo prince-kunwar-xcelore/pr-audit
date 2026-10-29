@@ -59,12 +59,12 @@ function handleUsageLimit(
   log.warn(err.message);
   try {
     provider.reportSkipped(ref, headSha, title, body, dryRun);
-  } catch {
-    log.warn('[warn] Could not post the skip notice');
+  } catch (e) {
+    log.warn(`[warn] Could not post the skip notice: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   if (process.env.GITHUB_ACTIONS === 'true') {
-    console.log(`::warning title=${title}::${err.message}`);
+    console.log(`::warning title=${escapeProperty(title)}::${escapeData(err.message)}`);
     if (process.env.GITHUB_STEP_SUMMARY) {
       fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### ${title}\n\n${err.message}\n`);
     }
@@ -73,9 +73,21 @@ function handleUsageLimit(
   return EXIT_USAGE_LIMIT;
 }
 
+// GitHub Actions workflow-command escaping (as in @actions/core)
+function escapeData(s: string): string {
+  return s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+}
+
+function escapeProperty(s: string): string {
+  return escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+}
+
 function parseFlag(args: string[], flag: string): string {
   const idx = args.indexOf(flag);
-  return idx !== -1 ? (args[idx + 1] ?? '') : '';
+  if (idx === -1) return '';
+  const value = args[idx + 1];
+  if (value === undefined || value.startsWith('--')) throw new Error(`${flag} needs a value`);
+  return value;
 }
 
 function flagIndices(args: string[], ...flags: string[]): Set<number> {
@@ -287,7 +299,7 @@ main().catch(async (err) => {
     if (!log.filePath) console.error(`Error: ${err.message}`);
     log.error(err.message);
     if (process.env.GITHUB_ACTIONS === 'true') {
-      console.log(`::error title=${err.engine} authentication failed::${err.message}`);
+      console.log(`::error title=${escapeProperty(`${err.engine} authentication failed`)}::${escapeData(err.message)}`);
     }
     await log.close();
     process.exit(1);

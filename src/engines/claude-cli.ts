@@ -21,15 +21,17 @@ interface ClaudeEnvelope {
   };
 }
 
-// On failure the JSON envelope carries the reason; fall back to the raw output when it isn't one
+// On failure the JSON envelope carries the reason. A non-error envelope's result is the
+// agent's answer (it can quote the diff), so only stderr counts then. Raw stdout is used only
+// when it isn't an envelope at all.
 function failureText(stdout = '', stderr = ''): string {
+  let envelope: Partial<ClaudeEnvelope>;
   try {
-    const envelope = JSON.parse(stdout.trim()) as Partial<ClaudeEnvelope>;
-    if (envelope.is_error && envelope.result) return `${envelope.result}\n${stderr}`;
+    envelope = JSON.parse(stdout.trim()) as Partial<ClaudeEnvelope>;
   } catch {
-    // not an envelope
+    return `${stdout}\n${stderr}`;
   }
-  return `${stdout}\n${stderr}`;
+  return envelope.is_error && envelope.result ? `${envelope.result}\n${stderr}` : stderr;
 }
 
 function makeTempHome(credentialsOrToken: string): string {

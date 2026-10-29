@@ -27,6 +27,8 @@ env:
 jobs:
   review:
     name: AI PR Review
+    # Fork PRs get no secrets, no OIDC token and a read-only GITHUB_TOKEN: skip instead of failing
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
