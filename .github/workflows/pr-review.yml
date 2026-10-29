@@ -44,12 +44,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: prince-kunwar-xcelore/agent-gateway
+          ref: 93ef8e5fe91ebd422dc25e6d2b3a931f8c61bfd9  # pin: agent-gateway main (bump: scripts/pin-review-tools.sh in agent-gateway)
           path: _agent-gateway
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.4
 
       - name: Install agent-gateway deps
         run: cd _agent-gateway && bun install
@@ -58,6 +59,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: prince-kunwar-xcelore/pr-audit
+          ref: 4b2e64a873d11d664ea55d5d0464dee59462f09e  # pin: pr-audit main (bump: scripts/pin-review-tools.sh in agent-gateway)
           path: _pr-audit
 
       - name: Install pr-audit deps
