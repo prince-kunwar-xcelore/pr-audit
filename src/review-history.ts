@@ -1,3 +1,5 @@
+import type { ReviewOutput } from './types.js';
+
 /**
  * What earlier pr-audit runs left on a PR: the commit the last review covered
  * (from a hidden marker in its body) and its inline comment threads.
@@ -10,6 +12,10 @@ export interface PriorThread {
   body: string;
   /** Replies, oldest first. */
   replies: { author: string; body: string }[];
+  /** Marked resolved on the platform. */
+  resolved: boolean;
+  /** The lines it points at have changed since (GitHub: \`line\` is null). */
+  outdated: boolean;
 }
 
 export interface ReviewHistory {
@@ -36,6 +42,44 @@ export function isPrAuditComment(body: string): boolean {
   return PR_AUDIT_COMMENT.test(body);
 }
 
+function status(t: PriorThread): string {
+  return t.resolved ? 'resolved' : t.outdated ? 'outdated' : 'open';
+}
+
+export interface OpenFindings {
+  critical: number;
+  warning: number;
+}
+
+/** Earlier critical/warning threads on `paths` that are neither resolved nor outdated. */
+export function countOpenFindings(threads: PriorThread[], paths: string[]): OpenFindings {
+  const open = threads.filter((t) => paths.includes(t.path) && status(t) === 'open');
+  return {
+    critical: open.filter((t) => t.body.startsWith('**[critical]**')).length,
+    warning: open.filter((t) => t.body.startsWith('**[warning]**')).length,
+  };
+}
+
+/**
+ * The agent is told not to repeat earlier findings, so it may approve while they're still open.
+ * Open critical findings keep the verdict at REQUEST_CHANGES, open warnings at COMMENT.
+ */
+export function holdForOpenFindings(
+  verdict: ReviewOutput['verdict'],
+  open: OpenFindings,
+): { verdict: ReviewOutput['verdict']; note: string | null } {
+  const total = open.critical + open.warning;
+  if (total === 0) return { verdict, note: null };
+  const held = open.critical ? 'REQUEST_CHANGES' : verdict === 'APPROVE' ? 'COMMENT' : verdict;
+  const counts = [open.critical && `${open.critical} critical`, open.warning && `${open.warning} warning`]
+    .filter(Boolean)
+    .join(', ');
+  return {
+    verdict: held,
+    note: `${total} earlier finding(s) still open (${counts}). Resolve those threads, or push a fix that changes the lines they point at.`,
+  };
+}
+
 const MAX_BODY = 300;
 const MAX_REPLY = 200;
 const MAX_REPLIES = 3;
@@ -56,7 +100,7 @@ export function renderPriorThreads(threads: PriorThread[], paths: string[]): str
       .slice(-MAX_REPLIES)
       .map((r) => `\n    ↳ ${r.author}: ${clip(r.body, MAX_REPLY)}`)
       .join('');
-    return `- ${t.path}${t.line ? `:${t.line}` : ''} ${clip(t.body, MAX_BODY)}${replies}`;
+    return `- ${t.path}${t.line ? `:${t.line}` : ''} (${status(t)}) ${clip(t.body, MAX_BODY)}${replies}`;
   });
   return lines.join('\n');
 }

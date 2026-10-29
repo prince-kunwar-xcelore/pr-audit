@@ -13,7 +13,7 @@ src/
   auth-token.ts         Credentials from --auth-token / --auth-token-file / env; argv redaction for logs
   claude.ts             Prompt building (buildPrompt, buildSynthesisPrompt) + mergeResults
   diff.ts               Unified diff parsing, file filtering, chunking, comment validation
-  review-history.ts     Incremental reviews: SHA marker, earlier pr-audit threads, prompt rendering
+  review-history.ts     Incremental reviews: SHA marker, earlier pr-audit threads (open/resolved/outdated), open-findings verdict hold
   logger.ts             Dual-stream logging (console + file)
   providers/
     github.ts           GitHubProvider — fetches via `gh` CLI, posts via GitHub API

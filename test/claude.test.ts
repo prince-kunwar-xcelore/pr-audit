@@ -31,12 +31,12 @@ describe('buildPrompt', () => {
     const prompt = buildPrompt(PR_DATA, parseDiffString(SIMPLE_DIFF), 'pull request', {
       sinceSha: '0123456789abcdef',
       priorThreads: [
-        { path: 'file.ts', line: 2, body: '**[warning]** b is unused', replies: [{ author: 'dev', body: 'Intended, used later' }] },
-        { path: 'other.ts', line: 1, body: '**[critical]** elsewhere', replies: [] },
+        { path: 'file.ts', line: 2, body: '**[warning]** b is unused', replies: [{ author: 'dev', body: 'Intended, used later' }], resolved: false, outdated: false },
+        { path: 'other.ts', line: 1, body: '**[critical]** elsewhere', replies: [], resolved: false, outdated: false },
       ],
     });
     expect(prompt).toContain('only the changes pushed since the last review (commit 0123456)');
-    expect(prompt).toContain('- file.ts:2 **[warning]** b is unused\n    ↳ dev: Intended, used later');
+    expect(prompt).toContain('- file.ts:2 (open) **[warning]** b is unused\n    ↳ dev: Intended, used later');
     expect(prompt).not.toContain('elsewhere');
   });
 

@@ -109,16 +109,19 @@ describe('GitHubProvider review history', () => {
         { id: 2, in_reply_to_id: 1, path: 'a.ts', line: 3, original_line: 3, body: 'fixed', user: { login: 'dev' } },
         { id: 3, path: 'b.ts', line: null, original_line: 9, body: '**[critical]** c', user: { login: 'github-actions[bot]' } },
         { id: 4, path: 'b.ts', line: 1, original_line: 1, body: 'a human comment', user: { login: 'dev' } },
-      ]));
+      ]))
+      .mockReturnValueOnce('1\n');
 
     const history = new GitHubProvider().fetchReviewHistory(ref);
 
     expect(mockExec.mock.calls[0][1]).toEqual(['api', '--paginate', 'repos/owner/repo/pulls/7/reviews', '--jq', '.[] | tojson']);
     expect(history.lastSha).toBe('bbbbbbb');
     expect(history.threads).toEqual([
-      { path: 'a.ts', line: 3, body: '**[warning]** w', replies: [{ author: 'dev', body: 'fixed' }] },
-      { path: 'b.ts', line: 9, body: '**[critical]** c', replies: [] },
+      { path: 'a.ts', line: 3, body: '**[warning]** w', replies: [{ author: 'dev', body: 'fixed' }], resolved: true, outdated: false },
+      { path: 'b.ts', line: 9, body: '**[critical]** c', replies: [], resolved: false, outdated: true },
     ]);
+    const graphql = mockExec.mock.calls[2][1] as string[];
+    expect(graphql.slice(0, 9)).toEqual(['api', 'graphql', '--paginate', '-F', 'owner=owner', '-F', 'name=repo', '-F', 'number=7']);
   });
 
   it('returns the compare diff when the old SHA is an ancestor', () => {

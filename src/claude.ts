@@ -49,7 +49,7 @@ export function buildPrompt(
     ? `\n\nThis diff contains only the changes pushed since the last review (commit ${context.sinceSha.slice(0, 7)}); everything before that was already reviewed.`
     : "";
   const discussed = prior
-    ? `\n\nAlready discussed — earlier review comments on these files and the replies to them. Do not raise these points again unless the new changes reintroduce or worsen them:\n${prior}`
+    ? `\n\nAlready discussed — earlier review comments on these files and the replies to them. Do not raise these points again unless the new changes reintroduce or worsen them. Threads marked (open) are unresolved: if the code they point at is still there, they still count against your verdict, so do not APPROVE past an open critical or warning:\n${prior}`
     : "";
 
   return `${systemRules(reviewTerm)}
