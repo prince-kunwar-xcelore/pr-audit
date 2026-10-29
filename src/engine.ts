@@ -33,7 +33,7 @@ export class UsageLimitError extends Error {
 //   Claude: "Claude AI usage limit reached|<epoch>" / "You've hit your limit · resets 3pm"
 //           / "You've hit your 5-hour limit · resets 8:10am (UTC)" (also weekly variants)
 // Transient rate limits (HTTP 429) are deliberately not matched — those are worth retrying.
-const USAGE_LIMIT = /usage limit|hit your (?:[\w-]+ )?limit/i;
+const USAGE_LIMIT = /usage limit|hit your (?:usage |\d+-hour |daily |weekly |monthly )?limit/i;
 
 /** Return a UsageLimitError if `output` is a subscription-quota message, else null. */
 export function detectUsageLimit(engine: string, output: string): UsageLimitError | null {

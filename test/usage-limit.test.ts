@@ -21,6 +21,8 @@ describe('detectUsageLimit', () => {
     // Seen in CI on agent-gateway#21 (the CLI's result text for a 429)
     expect(detectUsageLimit('Claude CLI', '{"is_error":true,"api_error_status":429,"result":"You\'ve hit your 5-hour limit · resets 8:10am (UTC)"}')?.resetsAt).toBe('8:10am (UTC)');
     expect(detectUsageLimit('Claude CLI', "You've hit your weekly limit · resets Mon 9am")).not.toBeNull();
+    // Transient rate limits stay retryable
+    expect(detectUsageLimit('Claude CLI', "You've hit your rate limit")).toBeNull();
   });
 
   it('ignores transient rate limits and other errors', () => {
