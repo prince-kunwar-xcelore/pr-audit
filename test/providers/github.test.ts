@@ -2,17 +2,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import '../setup.js';
 
 vi.mock('child_process', () => ({
-  execSync: vi.fn(),
+  execFileSync: vi.fn(),
 }));
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { GitHubProvider } from '../../src/providers/github.js';
 
-const mockExec = vi.mocked(execSync);
+const mockExec = vi.mocked(execFileSync);
+
+/** The command line a mocked call would have run, for readable assertions. */
+function cmd(call: unknown[]): string {
+  return [call[0] as string, ...(call[1] as string[])].join(' ');
+}
 const ref = { slug: 'owner/repo', number: 7 };
 
 function payload(call: unknown[]): Record<string, unknown> {
-  return JSON.parse((call[1] as { input: Buffer }).input.toString());
+  return JSON.parse((call[2] as { input: Buffer }).input.toString());
 }
 
 describe('GitHubProvider.reportSkipped', () => {
@@ -24,9 +29,9 @@ describe('GitHubProvider.reportSkipped', () => {
   it('posts a PR comment and a neutral check run on the head commit', () => {
     new GitHubProvider().reportSkipped(ref, 'sha1', 'AI review skipped', 'quota');
 
-    expect(mockExec.mock.calls[0][0]).toBe('gh api --method POST /repos/owner/repo/issues/7/comments --input -');
+    expect(cmd(mockExec.mock.calls[0])).toBe('gh api --method POST /repos/owner/repo/issues/7/comments --input -');
     expect(payload(mockExec.mock.calls[0])).toEqual({ body: 'quota' });
-    expect(mockExec.mock.calls[1][0]).toBe('gh api --method POST /repos/owner/repo/check-runs --input -');
+    expect(cmd(mockExec.mock.calls[1])).toBe('gh api --method POST /repos/owner/repo/check-runs --input -');
     expect(payload(mockExec.mock.calls[1])).toMatchObject({ head_sha: 'sha1', conclusion: 'neutral', status: 'completed' });
   });
 
@@ -67,5 +72,20 @@ describe('GitHubProvider.postReview', () => {
     mockExec.mockImplementationOnce(() => { throw Object.assign(new Error('boom'), { stdout: '{"message":"Not Found"}' }); });
     expect(() => new GitHubProvider().postReview(ref, 'sha1', { summary: 's', verdict: 'APPROVE', comments: [] }, [])).toThrow('boom');
     expect(mockExec).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('GitHubProvider.fetchPr', () => {
+  beforeEach(() => {
+    mockExec.mockReset();
+  });
+
+  it('passes the slug as a single argument, never through a shell', () => {
+    mockExec.mockReturnValueOnce('{"title":"t","body":"","headRefOid":"sha1"}').mockReturnValueOnce('');
+    new GitHubProvider().fetchPr({ slug: 'owner/repo;touch pwned', number: 7 });
+
+    expect(mockExec.mock.calls[0][0]).toBe('gh');
+    expect(mockExec.mock.calls[0][1]).toEqual(['pr', 'view', '7', '--repo', 'owner/repo;touch pwned', '--json', 'title,body,headRefOid']);
+    expect(mockExec.mock.calls[1][1]).toEqual(['pr', 'diff', '7', '--repo', 'owner/repo;touch pwned']);
   });
 });

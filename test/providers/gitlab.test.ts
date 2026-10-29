@@ -2,13 +2,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import '../setup.js';
 
 vi.mock('child_process', () => ({
-  execSync: vi.fn(),
+  execFileSync: vi.fn(),
 }));
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { GitLabProvider } from '../../src/providers/gitlab.js';
 
-const mockExec = vi.mocked(execSync);
+const mockExec = vi.mocked(execFileSync);
+
+/** The command line a mocked call would have run, for readable assertions. */
+function cmd(call: unknown[]): string {
+  return [call[0] as string, ...(call[1] as string[])].join(' ');
+}
 
 const MR_META = {
   title: 'Test MR',
@@ -32,7 +37,7 @@ function setupProvider(slug = 'group/project', number = 1): GitLabProvider {
 }
 
 function getPayload(call: unknown[]): { body: string; position?: object } {
-  const options = call[1] as { input: Buffer };
+  const options = call[2] as { input: Buffer };
   return JSON.parse(options.input.toString());
 }
 
@@ -50,8 +55,8 @@ describe('GitLabProvider', () => {
 
       const result = provider.fetchPr({ slug: 'group/project', number: 1 });
 
-      expect(mockExec.mock.calls[0][0]).toBe('glab mr view 1 -R group/project --output json');
-      expect(mockExec.mock.calls[1][0]).toBe('glab mr diff 1 -R group/project');
+      expect(cmd(mockExec.mock.calls[0])).toBe('glab mr view 1 -R group/project --output json');
+      expect(cmd(mockExec.mock.calls[1])).toBe('glab mr diff 1 -R group/project');
       expect(result.title).toBe('Test MR');
       expect(result.body).toBe('A test MR');
       expect(result.headSha).toBe('head-sha');
@@ -102,8 +107,7 @@ describe('GitLabProvider', () => {
 
       expect(mockExec).toHaveBeenCalled();
       for (const call of mockExec.mock.calls) {
-        const cmd = call[0] as string;
-        expect(cmd).toContain(`-H 'Content-Type: application/json'`);
+        expect(call[1]).toEqual(expect.arrayContaining(['-H', 'Content-Type: application/json']));
       }
     });
 
@@ -117,8 +121,7 @@ describe('GitLabProvider', () => {
         [],
       );
 
-      const cmd = mockExec.mock.calls[0][0] as string;
-      expect(cmd).toContain('projects/group%2Fsubgroup%2Fproject/merge_requests/7');
+      expect(cmd(mockExec.mock.calls[0])).toContain('projects/group%2Fsubgroup%2Fproject/merge_requests/7');
     });
 
     it('builds discussion position object from cached diff refs', () => {
@@ -153,7 +156,7 @@ describe('GitLabProvider', () => {
         [],
       );
 
-      const endpoints = mockExec.mock.calls.map((c) => c[0] as string);
+      const endpoints = mockExec.mock.calls.map((c) => cmd(c));
       expect(endpoints.some((e) => e.includes('/approve'))).toBe(true);
     });
 
@@ -167,7 +170,7 @@ describe('GitLabProvider', () => {
         [],
       );
 
-      const endpoints = mockExec.mock.calls.map((c) => c[0] as string);
+      const endpoints = mockExec.mock.calls.map((c) => cmd(c));
       expect(endpoints.some((e) => e.includes('/approve'))).toBe(false);
     });
 
@@ -181,7 +184,7 @@ describe('GitLabProvider', () => {
         [],
       );
 
-      const endpoints = mockExec.mock.calls.map((c) => c[0] as string);
+      const endpoints = mockExec.mock.calls.map((c) => cmd(c));
       expect(endpoints.some((e) => e.includes('/approve'))).toBe(false);
     });
 
@@ -195,7 +198,7 @@ describe('GitLabProvider', () => {
         [],
       );
 
-      const noteCall = mockExec.mock.calls.find((c) => (c[0] as string).includes('/notes'));
+      const noteCall = mockExec.mock.calls.find((c) => cmd(c).includes('/notes'));
       expect(getPayload(noteCall!).body).toBe('## Changes Requested\n\nneeds work');
     });
 
@@ -209,7 +212,7 @@ describe('GitLabProvider', () => {
         [],
       );
 
-      const noteCall = mockExec.mock.calls.find((c) => (c[0] as string).includes('/notes'));
+      const noteCall = mockExec.mock.calls.find((c) => cmd(c).includes('/notes'));
       expect(getPayload(noteCall!).body).toBe('lgtm');
     });
 
@@ -226,7 +229,7 @@ describe('GitLabProvider', () => {
         ],
       );
 
-      const endpoints = mockExec.mock.calls.map((c) => c[0] as string);
+      const endpoints = mockExec.mock.calls.map((c) => cmd(c));
       expect(endpoints[0]).toContain('/discussions');
       expect(endpoints[1]).toContain('/discussions');
       expect(endpoints[2]).toContain('/notes');
@@ -235,7 +238,7 @@ describe('GitLabProvider', () => {
   });
 
   describe('dry-run mode', () => {
-    it('does not call execSync when dryRun is true', () => {
+    it('does not call execFileSync when dryRun is true', () => {
       const provider = setupProvider();
 
       provider.postReview(

@@ -91,7 +91,7 @@ pnpm test                        # run once
 pnpm test:watch                  # watch mode
 ```
 
-Tests use `MockEngine` and `MockProvider` for isolation. The null logger is injected via `test/setup.ts`. Provider-specific tests live in `test/providers/<name>.test.ts` and mock `child_process.execSync` to assert on the exact shell command + payload (without hitting the network).
+Tests use `MockEngine` and `MockProvider` for isolation. The null logger is injected via `test/setup.ts`. Provider-specific tests live in `test/providers/<name>.test.ts` and mock `child_process.execFileSync` to assert on the exact command arguments + payload (without hitting the network).
 
 ## Maintenance
 

@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -76,8 +76,9 @@ export class ClaudeCliEngine implements ReviewEngine {
     const { env, tempHome } = this.buildEnv();
     let raw: string;
     try {
-      raw = execSync(
-        `claude -p --model ${model} --effort ${this.effort} --output-format json --json-schema '${OUTPUT_SCHEMA}'`,
+      raw = execFileSync(
+        'claude',
+        ['-p', '--model', model, '--effort', this.effort, '--output-format', 'json', '--json-schema', OUTPUT_SCHEMA],
         {
           input: prompt,
           encoding: 'utf8',
@@ -151,7 +152,7 @@ export class ClaudeCliEngine implements ReviewEngine {
     const { env, tempHome } = this.buildEnv();
     let raw: string;
     try {
-      raw = execSync(`claude -p --model ${model} --effort ${this.effort}`, {
+      raw = execFileSync('claude', ['-p', '--model', model, '--effort', this.effort], {
         input: prompt,
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
