@@ -37,6 +37,8 @@ src/
 - `synthesize(prompt, model): string` — plain text summary synthesis
 - `defaultModel` — each engine knows its default (`claude-sonnet-5-5`, `gpt-6.1-sol`); effort comes from `--effort` (default medium) and is passed as `claude --effort` / codex `-c model_reasoning_effort`
 - Engines throw `UsageLimitError` (via `detectUsageLimit()`) when the agent subscription is out of quota; `index.ts` skips retries, calls `reportSkipped()`, and exits 0 on GitHub Actions / 3 elsewhere (`EXIT_USAGE_LIMIT`)
+- Engines throw `AgentAuthError` (via `detectAuthError()`) when the agent CLI's credentials are missing/expired/rejected; `index.ts` skips retries, prints one line (plus a `::error` annotation on GitHub Actions), and exits 1
+- Both detectors only see failure text (Claude's error envelope `result`, Codex `turn.failed`/`error` events, stderr), never agent messages that may quote the diff
 
 ## Data Flow
 
