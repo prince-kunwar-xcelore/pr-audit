@@ -2,7 +2,7 @@ import { execFileSync } from 'child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { detectUsageLimit, type ReviewEngine } from '../engine.js';
+import { detectAuthError, detectUsageLimit, type ReviewEngine } from '../engine.js';
 import type { ReviewOutput, TokenUsage, BatchResult } from '../types.js';
 import { OUTPUT_SCHEMA } from '../claude.js';
 import { log } from '../logger.js';
@@ -43,12 +43,35 @@ function authJson(credentialsOrKey: string): string {
   throw new Error('Codex auth token is JSON but has neither tokens.access_token nor OPENAI_API_KEY');
 }
 
+// The failure reasons in codex's output: the `turn.failed` message first, then `error` events,
+// then stderr. Other events are skipped — they can echo the prompt (the diff under review).
+function failureText(stdout = '', stderr = ''): string {
+  const failed: string[] = [];
+  const errors: string[] = [];
+  for (const line of stdout.split('\n')) {
+    try {
+      const event = JSON.parse(line) as CodexEvent;
+      if (event.type === 'turn.failed') failed.push(event.error?.message ?? event.message ?? '');
+      else if (event.type === 'error') errors.push(event.message ?? '');
+    } catch {
+      // not an event
+    }
+  }
+  return [...failed, ...errors, stderr].join('\n');
+}
+
 export class CodexCliEngine implements ReviewEngine {
   readonly name = 'Codex CLI';
   readonly defaultModel = 'gpt-6.1-sol';
 
   // Effort is always passed explicitly: user config is ignored, and the model's own default is low
   constructor(private authToken = '', readonly effort = 'medium') {}
+
+  // Neither is worth retrying
+  private throwIfQuotaOrAuth(output: string): void {
+    const err = detectUsageLimit(this.name, output) ?? detectAuthError(this.name, 'codex', output);
+    if (err) throw err;
+  }
 
   private run(prompt: string, model: string, schema: string | null, timeout: number): CodexEvent[] {
     // Empty, read-only working dir: the diff is in the prompt, the agent has nothing to explore.
@@ -94,8 +117,7 @@ export class CodexCliEngine implements ReviewEngine {
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
       // codex exits non-zero when the turn fails; the reason is in its JSON events
-      const limit = detectUsageLimit(this.name, `${e.stdout ?? ''}\n${e.stderr ?? ''}`);
-      if (limit) throw limit;
+      this.throwIfQuotaOrAuth(failureText(e.stdout, e.stderr));
       log.error(`codex CLI error: ${e.message}`);
       if (e.stderr) log.error(`stderr: ${e.stderr.trim()}`);
       if (e.stdout) log.error(`stdout: ${e.stdout.trim()}`);
@@ -120,8 +142,7 @@ export class CodexCliEngine implements ReviewEngine {
     // Only a failed turn is fatal; standalone `error` events can be transient (e.g. a retried stream)
     const failure = events.find((e) => e.type === 'turn.failed');
     if (failure) {
-      const limit = detectUsageLimit(this.name, failure.error?.message ?? failure.message ?? '');
-      if (limit) throw limit;
+      this.throwIfQuotaOrAuth(failure.error?.message ?? failure.message ?? '');
       throw new Error(`Codex returned an error: ${failure.error?.message ?? failure.message ?? 'unknown'}`);
     }
     return events;

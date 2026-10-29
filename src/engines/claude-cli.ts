@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { detectUsageLimit, type ReviewEngine } from '../engine.js';
+import { detectAuthError, detectUsageLimit, type ReviewEngine } from '../engine.js';
 import type { ReviewOutput, TokenUsage, BatchResult } from '../types.js';
 import { OUTPUT_SCHEMA } from '../claude.js';
 import { log } from '../logger.js';
@@ -19,6 +19,17 @@ interface ClaudeEnvelope {
     cache_read_input_tokens: number;
     cache_creation_input_tokens: number;
   };
+}
+
+// On failure the JSON envelope carries the reason; fall back to the raw output when it isn't one
+function failureText(stdout = '', stderr = ''): string {
+  try {
+    const envelope = JSON.parse(stdout.trim()) as Partial<ClaudeEnvelope>;
+    if (envelope.is_error && envelope.result) return `${envelope.result}\n${stderr}`;
+  } catch {
+    // not an envelope
+  }
+  return `${stdout}\n${stderr}`;
 }
 
 function makeTempHome(credentialsOrToken: string): string {
@@ -70,6 +81,12 @@ export class ClaudeCliEngine implements ReviewEngine {
     if (tempHome) fs.rmSync(tempHome, { recursive: true, force: true });
   }
 
+  // Neither is worth retrying
+  private throwIfQuotaOrAuth(output: string): void {
+    const err = detectUsageLimit(this.name, output) ?? detectAuthError(this.name, 'claude', output);
+    if (err) throw err;
+  }
+
   review(prompt: string, model: string): BatchResult {
     log.debug(`Claude prompt:\n${prompt}`);
 
@@ -89,8 +106,7 @@ export class ClaudeCliEngine implements ReviewEngine {
       );
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
-      const limit = detectUsageLimit(this.name, `${e.stdout ?? ''}\n${e.stderr ?? ''}`);
-      if (limit) throw limit;
+      this.throwIfQuotaOrAuth(failureText(e.stdout, e.stderr));
       log.error(`claude CLI error: ${e.message}`);
       if (e.stderr) log.error(`stderr: ${e.stderr.trim()}`);
       if (e.stdout) log.error(`stdout: ${e.stdout.trim()}`);
@@ -111,8 +127,7 @@ export class ClaudeCliEngine implements ReviewEngine {
     }
 
     if (envelope.is_error) {
-      const limit = detectUsageLimit(this.name, envelope.result);
-      if (limit) throw limit;
+      this.throwIfQuotaOrAuth(envelope.result);
       throw new Error(`Claude returned an error: ${envelope.result}`);
     }
 
@@ -161,8 +176,7 @@ export class ClaudeCliEngine implements ReviewEngine {
       });
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
-      const limit = detectUsageLimit(this.name, `${e.stdout ?? ''}\n${e.stderr ?? ''}`);
-      if (limit) throw limit;
+      this.throwIfQuotaOrAuth(failureText(e.stdout, e.stderr));
       log.error(`claude CLI error (synthesis): ${e.message}`);
       if (e.stderr) log.error(`stderr: ${e.stderr.trim()}`);
       throw err;

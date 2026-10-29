@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'child_process';
 import { CodexCliEngine } from '../../src/engines/codex-cli.js';
-import { UsageLimitError } from '../../src/engine.js';
+import { AgentAuthError, UsageLimitError } from '../../src/engine.js';
 
 const mockExec = vi.mocked(execFileSync);
 
@@ -122,6 +122,33 @@ describe('CodexCliEngine', () => {
       throw err;
     });
     expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow(UsageLimitError);
+  });
+
+  it('throws AgentAuthError when codex exits on a 401', () => {
+    mockExec.mockImplementation(() => {
+      const err = new Error('Command failed') as Error & { stdout: string; stderr: string };
+      err.stdout = [
+        { type: 'error', message: 'Reconnecting... 1/5 (workspace routing discovery unauthorized (401))' },
+        { type: 'turn.failed', error: { message: 'workspace routing discovery unauthorized (401)' } },
+      ].map((e) => JSON.stringify(e)).join('\n');
+      err.stderr = '';
+      throw err;
+    });
+    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow(AgentAuthError);
+    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow(/failed: workspace routing discovery unauthorized \(401\) —/);
+  });
+
+  it('does not treat a usage-limit or auth phrase in an agent message as a failure reason', () => {
+    mockExec.mockImplementation(() => {
+      const err = new Error('Command failed') as Error & { stdout: string; stderr: string };
+      err.stdout = [
+        { type: 'item.completed', item: { type: 'agent_message', text: 'This diff handles "Not logged in" and "usage limit reached"' } },
+        { type: 'turn.failed', error: { message: 'stream disconnected before completion' } },
+      ].map((e) => JSON.stringify(e)).join('\n');
+      err.stderr = '';
+      throw err;
+    });
+    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow('Command failed');
   });
 
   it('rejects JSON auth without tokens or an API key, and still cleans up its temp dir', () => {

@@ -58,7 +58,7 @@ pr-audit owner/repo#123 --dry-run                                     # log payl
 | Code | Meaning |
 |---|---|
 | `0` | Review posted (or dry-run finished). On GitHub Actions, also when the review was skipped for a usage limit. |
-| `1` | Error (bad flags, fetch / engine / post failure). |
+| `1` | Error (bad flags, fetch / engine / post failure, agent authentication failure). |
 | `3` | Review skipped: the agent's usage limit was hit (outside GitHub Actions). |
 
 ## When the agent's usage limit is hit
@@ -73,6 +73,18 @@ first quota error (Codex: "You've hit your usage limit…", Claude: "usage limit
   as "passed with warnings".
 
 Transient errors (HTTP 429, "model at capacity") are still retried.
+
+## When the agent's credentials are rejected
+
+Expired or invalid credentials (Claude: "Not logged in", "Failed to authenticate: OAuth session
+expired…"; Codex: 401 Unauthorized) aren't retried either. pr-audit stops with one line, e.g.
+
+```
+Claude CLI authentication failed: Not logged in · Please run /login — refresh the login on the machine the credentials come from (run `claude` there once), or check the auth token
+```
+
+On GitHub Actions the same line is emitted as an `::error` annotation. Unlike a usage limit, this is a
+real failure: the job fails with exit code `1`.
 
 ## Running in CI
 

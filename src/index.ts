@@ -3,7 +3,7 @@ import process from 'node:process';
 import { resolveProvider, type GitProvider } from './provider.js';
 import type { PrRef, ReviewOutput, TokenUsage } from './types.js';
 import fs from 'node:fs';
-import { resolveEngine, UsageLimitError, DEFAULT_EFFORT, ENGINE_EFFORTS } from './engine.js';
+import { resolveEngine, AgentAuthError, UsageLimitError, DEFAULT_EFFORT, ENGINE_EFFORTS } from './engine.js';
 import { parseDiffString, chunkFiles, validateComments } from './diff.js';
 import { buildPrompt, buildSynthesisPrompt, mergeResults } from './claude.js';
 import { initLogger, log } from './logger.js';
@@ -17,8 +17,8 @@ async function withRetry<T>(fn: () => T, retries = 3, label = ''): Promise<T> {
     try {
       return fn();
     } catch (err) {
-      // Quota exhaustion won't clear in seconds — don't burn retries on it
-      if (attempt === retries || err instanceof UsageLimitError) throw err;
+      // Quota exhaustion and bad credentials won't clear in seconds — don't burn retries on them
+      if (attempt === retries || err instanceof UsageLimitError || err instanceof AgentAuthError) throw err;
       const delay = 2 ** attempt * 1000;
       log.warn(`${label} attempt ${attempt}/${retries} failed — retrying in ${delay / 1000}s...`);
       await sleep(delay);
@@ -237,6 +237,17 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (err) => {
+  if (err instanceof AgentAuthError) {
+    // One clear line instead of a stack trace; a real failure, so exit non-zero
+    log.section('FAILED: AGENT AUTHENTICATION');
+    if (!log.filePath) console.error(`Error: ${err.message}`);
+    log.error(err.message);
+    if (process.env.GITHUB_ACTIONS === 'true') {
+      console.log(`::error title=${err.engine} authentication failed::${err.message}`);
+    }
+    await log.close();
+    process.exit(1);
+  }
   // Before initLogger() the logger is a no-op (e.g. bad flags) — print directly
   if (!log.filePath) console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
   log.error(`[fatal] ${err instanceof Error ? err.stack ?? err.message : String(err)}`);

@@ -48,6 +48,38 @@ export function detectUsageLimit(engine: string, output: string): UsageLimitErro
   return new UsageLimitError(engine, line.trim().slice(0, 300), resetsAt);
 }
 
+/**
+ * The agent CLI's credentials are missing, expired or rejected. Retrying won't
+ * help; the login has to be refreshed where the credentials come from.
+ */
+export class AgentAuthError extends Error {
+  constructor(
+    readonly engine: string,
+    readonly detail: string,
+    /** The agent CLI to run once on the credentials' machine to refresh its login. */
+    readonly cli: string,
+  ) {
+    super(
+      `${engine} authentication failed: ${detail} — refresh the login on the machine the credentials ` +
+      `come from (run \`${cli}\` there once), or check the auth token`,
+    );
+    this.name = 'AgentAuthError';
+  }
+}
+
+// Credential failures, e.g.
+//   Claude: "Not logged in · Please run /login", "Failed to authenticate: OAuth session expired and could not be refreshed"
+//   Codex:  "workspace routing discovery unauthorized (401)", "Failed to refresh token status=401 Unauthorized"
+const AUTH_ERROR =
+  /not logged in|please run \/login|failed to authenticate|oauth (?:token|session) (?:has )?expired|invalid api key|authentication_error|unauthorized \(401\)|401 unauthorized|failed to refresh token|try signing in again/i;
+
+/** Return an AgentAuthError if `output` is a credentials failure, else null. */
+export function detectAuthError(engine: string, cli: string, output: string): AgentAuthError | null {
+  const line = output.split('\n').find((l) => AUTH_ERROR.test(l));
+  if (!line) return null;
+  return new AgentAuthError(engine, line.trim().slice(0, 200), cli);
+}
+
 export const DEFAULT_EFFORT = 'medium';
 
 /** Effort levels each engine's CLI accepts (Claude: `claude --effort`; Codex: gpt-6.1 models). */
