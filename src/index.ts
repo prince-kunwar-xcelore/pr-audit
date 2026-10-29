@@ -3,11 +3,12 @@ import process from 'node:process';
 import { resolveProvider, type GitProvider } from './provider.js';
 import type { ParsedFile, PrRef, ReviewOutput, TokenUsage } from './types.js';
 import fs from 'node:fs';
-import { resolveEngine, UsageLimitError, DEFAULT_EFFORT, ENGINE_EFFORTS } from './engine.js';
+import { resolveEngine, AgentAuthError, UsageLimitError, DEFAULT_EFFORT, ENGINE_EFFORTS } from './engine.js';
 import { parseDiffString, chunkFiles, validateComments } from './diff.js';
 import { buildPrompt, buildSynthesisPrompt, mergeResults } from './claude.js';
 import { initLogger, log } from './logger.js';
 import { reviewMarker, type ReviewHistory } from './review-history.js';
+import { readAuthToken, redactArgs, AUTH_TOKEN_ENV } from './auth-token.js';
 
 async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -18,8 +19,8 @@ async function withRetry<T>(fn: () => T, retries = 3, label = ''): Promise<T> {
     try {
       return fn();
     } catch (err) {
-      // Quota exhaustion won't clear in seconds — don't burn retries on it
-      if (attempt === retries || err instanceof UsageLimitError) throw err;
+      // Quota exhaustion and bad credentials won't clear in seconds — don't burn retries on them
+      if (attempt === retries || err instanceof UsageLimitError || err instanceof AgentAuthError) throw err;
       const delay = 2 ** attempt * 1000;
       log.warn(`${label} attempt ${attempt}/${retries} failed — retrying in ${delay / 1000}s...`);
       await sleep(delay);
@@ -91,7 +92,6 @@ async function main(): Promise<void> {
 
   const engineName = parseFlag(args, '--engine');
   const model = parseFlag(args, '--model');
-  const authToken = parseFlag(args, '--auth-token');
   const providerHint = parseFlag(args, '--provider');
   const effort = parseFlag(args, '--effort');
   const dryRun = args.includes('--dry-run');
@@ -102,24 +102,26 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const skipIdxs = flagIndices(args, '--engine', '--model', '--auth-token', '--provider', '--effort');
+  const skipIdxs = flagIndices(args, '--engine', '--model', '--auth-token', '--auth-token-file', '--provider', '--effort');
   const positional = args.filter((a, i) => !skipIdxs.has(i) && a !== '--dry-run' && a !== '--full');
   const arg = positional[0];
 
   if (!arg) {
     console.error(
-      'Usage: pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token>] [--provider github|gitlab] [--full] [--dry-run]\n' +
+      'Usage: pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider github|gitlab] [--full] [--dry-run]\n' +
       '\n' +
       'Supported formats:\n' +
       '  GitHub:  owner/repo#123  or  https://github.com/owner/repo/pull/123\n' +
       '  GitLab:  group/project!123  or  https://gitlab.com/group/project/-/merge_requests/123\n' +
       '\n' +
       'Engines: claude-cli (default), codex-cli\n' +
+      `Credentials: --auth-token, --auth-token-file or $${AUTH_TOKEN_ENV} (default: the agent CLI's own login)\n` +
       `Effort (default ${DEFAULT_EFFORT}): claude-cli ${ENGINE_EFFORTS['claude-cli'].join('|')}; codex-cli ${ENGINE_EFFORTS['codex-cli'].join('|')}`,
     );
     process.exit(1);
   }
 
+  const authToken = readAuthToken(args);
   const { provider, ref } = resolveProvider(arg, providerHint || undefined);
   const engine = resolveEngine(engineName || 'claude-cli', authToken, effort || DEFAULT_EFFORT);
   const effectiveModel = model || engine.defaultModel;
@@ -128,7 +130,7 @@ async function main(): Promise<void> {
   initLogger(label);
 
   log.section('RUN START');
-  log.debug(`Command: ${process.argv.join(' ')}`);
+  log.debug(`Command: ${redactArgs(process.argv).join(' ')}`);
   log.info(`Provider: ${provider.name}`);
   log.info(`Engine:   ${engine.name}`);
   log.info(`Model:    ${effectiveModel}`);
@@ -279,6 +281,17 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (err) => {
+  if (err instanceof AgentAuthError) {
+    // One clear line instead of a stack trace; a real failure, so exit non-zero
+    log.section('FAILED: AGENT AUTHENTICATION');
+    if (!log.filePath) console.error(`Error: ${err.message}`);
+    log.error(err.message);
+    if (process.env.GITHUB_ACTIONS === 'true') {
+      console.log(`::error title=${err.engine} authentication failed::${err.message}`);
+    }
+    await log.close();
+    process.exit(1);
+  }
   // Before initLogger() the logger is a no-op (e.g. bad flags) — print directly
   if (!log.filePath) console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
   log.error(`[fatal] ${err instanceof Error ? err.stack ?? err.message : String(err)}`);

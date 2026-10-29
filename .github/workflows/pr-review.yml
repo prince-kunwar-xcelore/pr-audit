@@ -13,7 +13,7 @@
 #                        the job proves its identity with GitHub OIDC (id-token: write below).
 #   Private key:         secret AGENT_GATEWAY_PRIVATE_KEY — contents of your private.pem,
 #                        proxy started with `serve --public-key public.pem`.
-#                        When this secret is set it takes precedence over OIDC.
+#                        Used as the fallback when the OIDC allowlist request fails.
 
 name: PR Review
 
@@ -68,12 +68,31 @@ jobs:
             codex)  bun install -g @openai/codex ;;
           esac
 
-      - name: Run PR Review
+      # Credentials go to a 0600 file and are masked: never on a command line, never in the log.
+      # If decrypt-token fails, the job stops here with its real error.
+      - name: Fetch agent credentials
         env:
           AGENT_GATEWAY_URL: ${{ secrets.AGENT_GATEWAY_URL }}
+          AGENT_GATEWAY_PRIVATE_KEY: ${{ secrets.AGENT_GATEWAY_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          bun "$GITHUB_WORKSPACE/_agent-gateway/src/index.ts" decrypt-token --agent "$REVIEW_AGENT" > "$RUNNER_TEMP/agent-auth"
+          # mask every line and every JSON string value (credentials files can be multi-line JSON)
+          { cat "$RUNNER_TEMP/agent-auth"; echo; jq -r '.. | strings' "$RUNNER_TEMP/agent-auth" 2>/dev/null || true; } |
+            while IFS= read -r secret; do
+              if [ "${#secret}" -ge 8 ]; then echo "::add-mask::$secret"; fi
+            done
+
+      - name: Run PR Review
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          bun ${{ github.workspace }}/_pr-audit/src/index.ts "$PR_URL" \
+          bun "$GITHUB_WORKSPACE/_pr-audit/src/index.ts" "$PR_URL" \
             --engine "$REVIEW_AGENT-cli" \
-            --auth-token "$(bun ${{ github.workspace }}/_agent-gateway/src/index.ts decrypt-token --agent "$REVIEW_AGENT")"
+            --auth-token-file "$RUNNER_TEMP/agent-auth"
+
+      - name: Remove agent credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/agent-auth"

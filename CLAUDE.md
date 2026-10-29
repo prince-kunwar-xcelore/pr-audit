@@ -10,6 +10,7 @@ src/
   types.ts              Shared types: PrRef, PrData, ReviewOutput, BatchResult, etc.
   provider.ts           GitProvider interface + resolveProvider() auto-detection
   engine.ts             ReviewEngine interface + resolveEngine() factory
+  auth-token.ts         Credentials from --auth-token / --auth-token-file / env; argv redaction for logs
   claude.ts             Prompt building (buildPrompt, buildSynthesisPrompt) + mergeResults
   diff.ts               Unified diff parsing, file filtering, chunking, comment validation
   review-history.ts     Incremental reviews: SHA marker, earlier pr-audit threads, prompt rendering
@@ -39,6 +40,8 @@ src/
 - `synthesize(prompt, model): string` — plain text summary synthesis
 - `defaultModel` — each engine knows its default (`claude-sonnet-5-5`, `gpt-6.1-sol`); effort comes from `--effort` (default medium) and is passed as `claude --effort` / codex `-c model_reasoning_effort`
 - Engines throw `UsageLimitError` (via `detectUsageLimit()`) when the agent subscription is out of quota; `index.ts` skips retries, calls `reportSkipped()`, and exits 0 on GitHub Actions / 3 elsewhere (`EXIT_USAGE_LIMIT`)
+- Engines throw `AgentAuthError` (via `detectAuthError()`) when the agent CLI's credentials are missing/expired/rejected; `index.ts` skips retries, prints one line (plus a `::error` annotation on GitHub Actions), and exits 1
+- Both detectors only see failure text (Claude's error envelope `result`, Codex `turn.failed`/`error` events, stderr), never agent messages that may quote the diff
 
 ## Data Flow
 
@@ -57,13 +60,13 @@ parseArgs → resolveProvider + resolveEngine
 ## CLI Flags
 
 ```
-pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token>] [--provider <provider>] [--full] [--dry-run]
+pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider <provider>] [--full] [--dry-run]
 ```
 
 - `--engine`: Review engine — `claude-cli` (default) or `codex-cli`. Required if `--model` is set.
 - `--model`: Model override. Uses engine's `defaultModel` if omitted.
 - `--effort`: Reasoning effort (default `medium`), validated per engine against `ENGINE_EFFORTS` in `src/engine.ts`.
-- `--auth-token`: Auth token passed to the engine — `claude-cli`: Claude credentials JSON or OAuth access token; `codex-cli`: contents of `~/.codex/auth.json` or an OpenAI API key.
+- `--auth-token` / `--auth-token-file` / `$PR_AUDIT_AUTH_TOKEN` (that precedence, see `src/auth-token.ts`): Auth token passed to the engine — `claude-cli`: Claude credentials JSON or OAuth access token; `codex-cli`: contents of `~/.codex/auth.json` or an OpenAI API key. Empty-but-given is an error; the `--auth-token` value is redacted from the logged command line.
 - `--provider`: Explicit git provider override (default: auto-detected from input).
 - `--full`: Review the whole PR even if an earlier pr-audit review exists (default: only changes since the commit in the last review's `<!-- pr-audit:sha=… -->` marker; GitHub only).
 - `--dry-run`: Run the review but log the would-be API payload instead of posting. Providers must honor the `dryRun` flag in `postReview()`.
