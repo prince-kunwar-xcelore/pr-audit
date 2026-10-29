@@ -7,7 +7,7 @@ import { resolveEngine, AgentAuthError, UsageLimitError, DEFAULT_EFFORT, ENGINE_
 import { parseDiffString, chunkFiles, validateComments } from './diff.js';
 import { buildPrompt, buildSynthesisPrompt, mergeResults } from './claude.js';
 import { initLogger, log } from './logger.js';
-import { reviewMarker, type ReviewHistory } from './review-history.js';
+import { countOpenFindings, holdForOpenFindings, reviewMarker, type ReviewHistory } from './review-history.js';
 import { readAuthToken, redactArgs, AUTH_TOKEN_ENV } from './auth-token.js';
 
 async function sleep(ms: number): Promise<void> {
@@ -272,6 +272,13 @@ async function main(): Promise<void> {
   if (validComments.length < merged.comments.length) {
     log.warn(`[warn] Dropped ${merged.comments.length - validComments.length} comment(s) with invalid line refs`);
   }
+
+  const hold = holdForOpenFindings(merged.verdict, countOpenFindings(history.threads, prFiles.map((f) => f.path)));
+  if (hold.verdict !== merged.verdict) {
+    log.info(`  Verdict ${merged.verdict} → ${hold.verdict}: earlier findings are still open`);
+    merged.verdict = hold.verdict;
+  }
+  if (hold.note) merged.summary = `${merged.summary}\n\n${hold.note}`;
 
   if (sinceSha) {
     merged.summary = `_Incremental review: changes since ${sinceSha.slice(0, 7)}._\n\n${merged.summary}`;

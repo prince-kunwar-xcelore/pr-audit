@@ -33,6 +33,32 @@ function listAll<T>(endpoint: string): T[] {
   return out.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as T);
 }
 
+/** Database IDs of the first comment of each resolved review thread (only GraphQL exposes resolution). */
+function resolvedThreadIds(ref: PrRef): Set<number> {
+  const [owner, name] = ref.slug.split('/');
+  const query = `query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { isResolved comments(first: 1) { nodes { databaseId } } }
+      }
+    }
+  }
+}`;
+  const out = execFileSync(
+    'gh',
+    [
+      'api', 'graphql', '--paginate',
+      '-F', `owner=${owner}`, '-F', `name=${name}`, '-F', `number=${ref.number}`,
+      '-f', `query=${query}`,
+      '--jq', '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved) | .comments.nodes[0].databaseId',
+    ],
+    { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 },
+  );
+  return new Set(out.split('\n').filter((l) => l.trim()).map(Number));
+}
+
 export class GitHubProvider implements GitProvider {
   readonly name = 'GitHub';
   readonly reviewTerm = 'pull request';
@@ -139,10 +165,18 @@ export class GitHubProvider implements GitProvider {
     }
 
     const comments = listAll<GitHubReviewComment>(`${base}/comments`);
+    const resolved = resolvedThreadIds(ref);
     const threads = new Map<number, PriorThread>();
     for (const c of comments) {
       if (!c.in_reply_to_id && isPrAuditComment(c.body) && byPoster(c.user)) {
-        threads.set(c.id, { path: c.path, line: c.line ?? c.original_line, body: c.body, replies: [] });
+        threads.set(c.id, {
+          path: c.path,
+          line: c.line ?? c.original_line,
+          body: c.body,
+          replies: [],
+          resolved: resolved.has(c.id),
+          outdated: c.line === null,
+        });
       }
     }
     for (const c of comments) {
