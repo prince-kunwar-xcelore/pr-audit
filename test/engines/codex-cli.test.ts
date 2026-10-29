@@ -148,14 +148,14 @@ describe('CodexCliEngine', () => {
       err.stderr = '';
       throw err;
     });
-    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow('Command failed');
+    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow('Codex returned an error: stream disconnected before completion');
   });
 
-  it('rejects JSON auth without tokens or an API key, and still cleans up its temp dir', () => {
-    const before = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('codex-review-')).length;
-    expect(() => new CodexCliEngine('{"something":"else"}').review('prompt', 'gpt-test')).toThrow(/neither tokens.access_token/);
-    const after = fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('codex-review-')).length;
-    expect(after).toBe(before);
+  it('rejects JSON auth without tokens or an API key up front, before creating temp dirs', () => {
+    const mkdtemp = vi.spyOn(fs, 'mkdtempSync');
+    expect(() => new CodexCliEngine('{"something":"else"}')).toThrow(/neither tokens.access_token/);
+    expect(mkdtemp).not.toHaveBeenCalled();
     expect(mockExec).not.toHaveBeenCalled();
+    mkdtemp.mockRestore();
   });
 });

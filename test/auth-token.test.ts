@@ -58,3 +58,11 @@ describe('redactArgs', () => {
     expect(redactArgs(['--auth-token-file', '/tmp/t'])).toEqual(['--auth-token-file', '/tmp/t']);
   });
 });
+
+describe('readAuthToken = form', () => {
+  it('rejects --auth-token=value without echoing the value', () => {
+    expect(() => readAuthToken(['--auth-token=secret', 'o/r#1'], {})).toThrow(/form isn't supported/);
+    expect(() => readAuthToken(['--auth-token=secret'], {})).not.toThrow(/secret/);
+    expect(() => readAuthToken(['--auth-token-file=/tmp/t'], {})).toThrow(/--auth-token-file <value>/);
+  });
+});

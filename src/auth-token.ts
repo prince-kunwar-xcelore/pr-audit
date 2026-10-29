@@ -19,6 +19,12 @@ export function readAuthToken(args: string[], env: NodeJS.ProcessEnv = process.e
     return value;
   };
 
+  // Not parsed, and as a positional it could be mistaken for the PR ref and echoed in an error
+  for (const a of args) {
+    const flag = /^(--auth-token(?:-file)?)=/.exec(a)?.[1];
+    if (flag) throw new Error(`Use \`${flag} <value>\`; the ${flag}=<value> form isn't supported`);
+  }
+
   const token = valueOf('--auth-token');
   const file = valueOf('--auth-token-file');
   if (token !== null && file !== null) throw new Error('Use either --auth-token or --auth-token-file, not both');

@@ -43,20 +43,29 @@ function authJson(credentialsOrKey: string): string {
   throw new Error('Codex auth token is JSON but has neither tokens.access_token nor OPENAI_API_KEY');
 }
 
+function parseEvents(stdout: string): CodexEvent[] {
+  const events: CodexEvent[] = [];
+  for (const line of stdout.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      events.push(JSON.parse(line) as CodexEvent);
+    } catch {
+      // codex may interleave non-JSON diagnostics; ignore them
+    }
+  }
+  return events;
+}
+
+function eventMessage(event: CodexEvent): string {
+  return event.error?.message ?? event.message ?? 'unknown';
+}
+
 // The failure reasons in codex's output: the `turn.failed` message first, then `error` events,
 // then stderr. Other events are skipped — they can echo the prompt (the diff under review).
 function failureText(stdout = '', stderr = ''): string {
-  const failed: string[] = [];
-  const errors: string[] = [];
-  for (const line of stdout.split('\n')) {
-    try {
-      const event = JSON.parse(line) as CodexEvent;
-      if (event.type === 'turn.failed') failed.push(event.error?.message ?? event.message ?? '');
-      else if (event.type === 'error') errors.push(event.message ?? '');
-    } catch {
-      // not an event
-    }
-  }
+  const events = parseEvents(stdout);
+  const failed = events.filter((e) => e.type === 'turn.failed').map(eventMessage);
+  const errors = events.filter((e) => e.type === 'error').map(eventMessage);
   return [...failed, ...errors, stderr].join('\n');
 }
 
@@ -65,7 +74,12 @@ export class CodexCliEngine implements ReviewEngine {
   readonly defaultModel = 'gpt-6.1-sol';
 
   // Effort is always passed explicitly: user config is ignored, and the model's own default is low
-  constructor(private authToken = '', readonly effort = 'medium') {}
+  private readonly auth: string | null;
+
+  constructor(authToken = '', readonly effort = 'medium') {
+    // Validated once here: a malformed token is deterministic, not worth the review retries
+    this.auth = authToken ? authJson(authToken) : null;
+  }
 
   // Neither is worth retrying
   private throwIfQuotaOrAuth(output: string): void {
@@ -78,7 +92,7 @@ export class CodexCliEngine implements ReviewEngine {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-review-'));
     // Credentials live in a separate dir, outside what the agent can browse — a prompt
     // injection in the diff must not be able to read them back into the review.
-    const codexHome = this.authToken ? fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-')) : null;
+    const codexHome = this.auth ? fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-')) : null;
     let raw: string;
     try {
       const args = [
@@ -102,7 +116,7 @@ export class CodexCliEngine implements ReviewEngine {
       const env = { ...process.env };
       if (codexHome) {
         fs.chmodSync(codexHome, 0o700);
-        fs.writeFileSync(path.join(codexHome, 'auth.json'), authJson(this.authToken), { mode: 0o600 });
+        fs.writeFileSync(path.join(codexHome, 'auth.json'), this.auth!, { mode: 0o600 });
         env.CODEX_HOME = codexHome;
       }
 
@@ -121,6 +135,9 @@ export class CodexCliEngine implements ReviewEngine {
       log.error(`codex CLI error: ${e.message}`);
       if (e.stderr) log.error(`stderr: ${e.stderr.trim()}`);
       if (e.stdout) log.error(`stdout: ${e.stdout.trim()}`);
+      // Surface the turn's own failure message rather than "Command failed: codex exec …"
+      const turnFailure = parseEvents(e.stdout ?? '').find((ev) => ev.type === 'turn.failed');
+      if (turnFailure) throw new Error(`Codex returned an error: ${eventMessage(turnFailure)}`);
       throw err;
     } finally {
       fs.rmSync(workDir, { recursive: true, force: true });
@@ -129,21 +146,13 @@ export class CodexCliEngine implements ReviewEngine {
 
     log.debug(`Codex raw events:\n${raw.trim()}`);
 
-    const events: CodexEvent[] = [];
-    for (const line of raw.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        events.push(JSON.parse(line) as CodexEvent);
-      } catch {
-        // codex may interleave non-JSON diagnostics; ignore them
-      }
-    }
+    const events = parseEvents(raw);
 
     // Only a failed turn is fatal; standalone `error` events can be transient (e.g. a retried stream)
     const failure = events.find((e) => e.type === 'turn.failed');
     if (failure) {
-      this.throwIfQuotaOrAuth(failure.error?.message ?? failure.message ?? '');
-      throw new Error(`Codex returned an error: ${failure.error?.message ?? failure.message ?? 'unknown'}`);
+      this.throwIfQuotaOrAuth(eventMessage(failure));
+      throw new Error(`Codex returned an error: ${eventMessage(failure)}`);
     }
     return events;
   }

@@ -12,7 +12,17 @@ interface GitHubReviewComment {
   original_line: number | null;
   body: string;
   user: { login: string } | null;
+  author_association: string;
 }
+
+interface GitHubReview {
+  body: string | null;
+  commit_id: string;
+  user: { login: string } | null;
+}
+
+// Replies from these can steer the next review ("already discussed"); anyone else's are dropped
+const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
 /** `gh api --paginate` over a list endpoint, one JSON object per line (works without --slurp). */
 function listAll<T>(endpoint: string): T[] {
@@ -116,25 +126,50 @@ export class GitHubProvider implements GitProvider {
 
   fetchReviewHistory(ref: PrRef): ReviewHistory {
     const base = `repos/${ref.slug}/pulls/${ref.number}`;
+    const posters = this.posterLogins();
+    const byPoster = (user: { login: string } | null) => !!user && posters.has(user.login);
 
-    const reviews = listAll<{ body: string | null }>(`${base}/reviews`);
+    // Only markers pr-audit itself could have posted: anyone can review a public PR, and a
+    // forged marker would skip or narrow the next review
+    const reviews = listAll<GitHubReview>(`${base}/reviews`);
     let lastSha: string | null = null;
-    for (const r of reviews) lastSha = parseReviewMarker(r.body) ?? lastSha;
+    for (const r of reviews) {
+      const sha = parseReviewMarker(r.body);
+      if (sha && sha === r.commit_id && byPoster(r.user)) lastSha = sha;
+    }
 
     const comments = listAll<GitHubReviewComment>(`${base}/comments`);
     const threads = new Map<number, PriorThread>();
     for (const c of comments) {
-      if (!c.in_reply_to_id && isPrAuditComment(c.body)) {
+      if (!c.in_reply_to_id && isPrAuditComment(c.body) && byPoster(c.user)) {
         threads.set(c.id, { path: c.path, line: c.line ?? c.original_line, body: c.body, replies: [] });
       }
     }
     for (const c of comments) {
       const thread = c.in_reply_to_id ? threads.get(c.in_reply_to_id) : undefined;
-      thread?.replies.push({ author: c.user?.login ?? 'unknown', body: c.body });
+      if (thread && (TRUSTED_ASSOCIATIONS.has(c.author_association) || byPoster(c.user))) {
+        thread.replies.push({ author: c.user?.login ?? 'unknown', body: c.body });
+      }
     }
 
     log.debug(`Review history: last reviewed ${lastSha ?? '(none)'}, ${threads.size} earlier pr-audit thread(s)`);
     return { lastSha, threads: [...threads.values()] };
+  }
+
+  // Who posts pr-audit's reviews: the Actions bot (fork PRs get a read-only token, so only
+  // this repo's workflows post as it) and the account gh is logged in as, for local runs
+  private posterLogins(): Set<string> {
+    const logins = new Set(['github-actions[bot]']);
+    try {
+      const login = execFileSync('gh', ['api', 'user', '--jq', '.login'], {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      if (login) logins.add(login);
+    } catch {
+      // the Actions GITHUB_TOKEN can't read /user
+    }
+    return logins;
   }
 
   fetchDiffSince(ref: PrRef, fromSha: string, headSha: string): string | null {
