@@ -10,6 +10,7 @@ src/
   types.ts              Shared types: PrRef, PrData, ReviewOutput, BatchResult, etc.
   provider.ts           GitProvider interface + resolveProvider() auto-detection
   engine.ts             ReviewEngine interface + resolveEngine() factory
+  auth-token.ts         Credentials from --auth-token / --auth-token-file / env; argv redaction for logs
   claude.ts             Prompt building (buildPrompt, buildSynthesisPrompt) + mergeResults
   diff.ts               Unified diff parsing, file filtering, chunking, comment validation
   logger.ts             Dual-stream logging (console + file)
@@ -54,13 +55,13 @@ parseArgs → resolveProvider + resolveEngine
 ## CLI Flags
 
 ```
-pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token>] [--provider <provider>] [--dry-run]
+pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider <provider>] [--dry-run]
 ```
 
 - `--engine`: Review engine — `claude-cli` (default) or `codex-cli`. Required if `--model` is set.
 - `--model`: Model override. Uses engine's `defaultModel` if omitted.
 - `--effort`: Reasoning effort (default `medium`), validated per engine against `ENGINE_EFFORTS` in `src/engine.ts`.
-- `--auth-token`: Auth token passed to the engine — `claude-cli`: Claude credentials JSON or OAuth access token; `codex-cli`: contents of `~/.codex/auth.json` or an OpenAI API key.
+- `--auth-token` / `--auth-token-file` / `$PR_AUDIT_AUTH_TOKEN` (that precedence, see `src/auth-token.ts`): Auth token passed to the engine — `claude-cli`: Claude credentials JSON or OAuth access token; `codex-cli`: contents of `~/.codex/auth.json` or an OpenAI API key. Empty-but-given is an error; the `--auth-token` value is redacted from the logged command line.
 - `--provider`: Explicit git provider override (default: auto-detected from input).
 - `--dry-run`: Run the review but log the would-be API payload instead of posting. Providers must honor the `dryRun` flag in `postReview()`.
 

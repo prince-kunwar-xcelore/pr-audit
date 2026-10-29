@@ -41,15 +41,15 @@ pr-audit https://gitlab.com/group/project/-/merge_requests/123
 pr-audit owner/repo#123 --engine claude-cli --model claude-opus-5-5   # specific engine + model
 pr-audit owner/repo#123 --engine codex-cli                            # review with Codex
 pr-audit owner/repo#123 --effort high                                 # more reasoning (default: medium)
-pr-audit owner/repo#123 --auth-token "$(cat ~/.claude/.credentials.json)"   # explicit Claude credentials
-pr-audit owner/repo#123 --engine codex-cli --auth-token "$(cat ~/.codex/auth.json)"
+pr-audit owner/repo#123 --auth-token-file ~/.claude/.credentials.json  # explicit Claude credentials
+pr-audit owner/repo#123 --engine codex-cli --auth-token-file ~/.codex/auth.json
 pr-audit owner/repo#123 --provider github                             # explicit provider override
 pr-audit owner/repo#123 --dry-run                                     # log payload, do not post
 ```
 
 - **Provider** is auto-detected from the input format (`#` → GitHub, `!` → GitLab, URL hostname). Use `--provider` to override (e.g. self-hosted instances).
 - **Engine** defaults to `claude-cli` with model `claude-sonnet-5-5`; `codex-cli` defaults to `gpt-6.1-sol`. Both run at **medium** reasoning effort; override with `--effort` (claude-cli: low, medium, high, xhigh, max; codex-cli: low, medium, high, xhigh, max, ultra). Use `--engine` to select an engine; `--model` requires `--engine`.
-- **Auth**: without `--auth-token`, each engine uses your local login. `--auth-token` takes, for `claude-cli`, the contents of `~/.claude/.credentials.json` or a bare OAuth access token; for `codex-cli`, the contents of `~/.codex/auth.json` or an OpenAI API key. Credentials are written to a temporary home for the call and deleted afterwards.
+- **Auth**: by default each engine uses your local login. To pass credentials explicitly, use `--auth-token-file <path>` (preferred: keeps them out of the process list), `--auth-token <value>`, or the `PR_AUDIT_AUTH_TOKEN` env var, in that order of precedence. The value is, for `claude-cli`, the contents of `~/.claude/.credentials.json` or a bare OAuth access token; for `codex-cli`, the contents of `~/.codex/auth.json` or an OpenAI API key. A given-but-empty value (empty file, `--auth-token ""`, empty env var) is an error rather than a silent fallback to the local login. Credentials are written to a temporary home for the call and deleted afterwards, and the `--auth-token` value is redacted from the run log.
 - **Codex** runs `codex exec` in an empty read-only sandbox with your user config ignored, so local MCP servers and hooks don't leak into reviews. Its credentials live outside that sandbox directory, so the agent can't read them back into a review. It reports token usage but no dollar cost (subscription-billed).
 - **Dry-run** runs the full review (it still uses your agent quota) but skips the final post. Use it to preview what would be sent.
 
@@ -92,17 +92,30 @@ permissions:
   id-token: write        # prove the repo's identity to agent-gateway (OIDC)
   checks: write          # neutral "AI review" check when the usage limit is hit
 ...
-- env:
+- name: Fetch agent credentials
+  env:
     AGENT_GATEWAY_URL: ${{ secrets.AGENT_GATEWAY_URL }}
+  run: |
+    set -euo pipefail
+    umask 077
+    bun _agent-gateway/src/index.ts decrypt-token --agent "$REVIEW_AGENT" > "$RUNNER_TEMP/agent-auth"
+    # mask every line and every JSON string value, so the credentials never show in logs
+    { cat "$RUNNER_TEMP/agent-auth"; echo; jq -r '.. | strings' "$RUNNER_TEMP/agent-auth" 2>/dev/null || true; } |
+      while IFS= read -r secret; do
+        if [ "${#secret}" -ge 8 ]; then echo "::add-mask::$secret"; fi
+      done
+- env:
     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     PR_URL: ${{ github.event.pull_request.html_url }}
   run: |
     bun _pr-audit/src/index.ts "$PR_URL" --engine "$REVIEW_AGENT-cli" \
-      --auth-token "$(bun _agent-gateway/src/index.ts decrypt-token --agent "$REVIEW_AGENT")"
+      --auth-token-file "$RUNNER_TEMP/agent-auth"
 ```
 
+The credentials never appear in a command line, and if `decrypt-token` fails the job stops at that
+step with its real error instead of reviewing with an empty token.
+
 This repo reviews its own PRs this way (`.github/workflows/pr-review.yml`).
-Passing credentials via a file instead of the command line is tracked in [#8](https://github.com/prince-kunwar-xcelore/pr-audit/issues/8).
 
 ## How it works
 
