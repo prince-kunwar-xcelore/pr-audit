@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import type { GitProvider } from '../provider.js';
 import type { PrRef, PrData, ReviewComment, ReviewOutput } from '../types.js';
 import { log } from '../logger.js';
@@ -24,7 +24,7 @@ export class GitLabProvider implements GitProvider {
     const { slug, number } = ref;
 
     log.debug(`glab mr view ${number} -R ${slug} --output json`);
-    const metaRaw = execSync(`glab mr view ${number} -R ${slug} --output json`, {
+    const metaRaw = execFileSync('glab', ['mr', 'view', String(number), '-R', slug, '--output', 'json'], {
       encoding: 'utf8',
     });
     const meta = JSON.parse(metaRaw) as GitLabMrMeta;
@@ -42,7 +42,7 @@ export class GitLabProvider implements GitProvider {
     this.diffRefs = meta.diff_refs;
 
     log.debug(`glab mr diff ${number} -R ${slug}`);
-    const diff = execSync(`glab mr diff ${number} -R ${slug}`, {
+    const diff = execFileSync('glab', ['mr', 'diff', String(number), '-R', slug], {
       encoding: 'utf8',
     });
     log.debug(`Diff fetched: ${diff.length} bytes`);
@@ -124,8 +124,9 @@ export class GitLabProvider implements GitProvider {
 
     let response: string;
     try {
-      response = execSync(
-        `glab api --method POST -H 'Content-Type: application/json' ${endpoint} --input -`,
+      response = execFileSync(
+        'glab',
+        ['api', '--method', 'POST', '-H', 'Content-Type: application/json', endpoint, '--input', '-'],
         {
           input: Buffer.from(JSON.stringify(payload)),
           encoding: 'utf8',

@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import type { GitProvider } from '../provider.js';
 import type { PrRef, PrData, ReviewComment, ReviewOutput } from '../types.js';
 import { log } from '../logger.js';
@@ -11,15 +11,16 @@ export class GitHubProvider implements GitProvider {
     const { slug, number } = ref;
 
     log.debug(`gh pr view ${number} --repo ${slug} --json title,body,headRefOid`);
-    const metaRaw = execSync(
-      `gh pr view ${number} --repo ${slug} --json title,body,headRefOid`,
+    const metaRaw = execFileSync(
+      'gh',
+      ['pr', 'view', String(number), '--repo', slug, '--json', 'title,body,headRefOid'],
       { encoding: 'utf8' },
     );
     const meta = JSON.parse(metaRaw) as { title: string; body: string; headRefOid: string };
     log.debug(`PR metadata: ${JSON.stringify({ title: meta.title, headSha: meta.headRefOid, bodyLength: meta.body?.length ?? 0 })}`);
 
     log.debug(`gh pr diff ${number} --repo ${slug}`);
-    const diff = execSync(`gh pr diff ${number} --repo ${slug}`, {
+    const diff = execFileSync('gh', ['pr', 'diff', String(number), '--repo', slug], {
       encoding: 'utf8',
     });
     log.debug(`Diff fetched: ${diff.length} bytes`);
@@ -64,7 +65,7 @@ export class GitHubProvider implements GitProvider {
 
     let response: string;
     try {
-      response = execSync(`gh api --method POST ${endpoint} --input -`, {
+      response = execFileSync('gh', ['api', '--method', 'POST', endpoint, '--input', '-'], {
         input: Buffer.from(JSON.stringify(payload)),
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -124,7 +125,7 @@ export class GitHubProvider implements GitProvider {
 
   private post(endpoint: string, payload: object, label: string): void {
     try {
-      execSync(`gh api --method POST ${endpoint} --input -`, {
+      execFileSync('gh', ['api', '--method', 'POST', endpoint, '--input', '-'], {
         input: Buffer.from(JSON.stringify(payload)),
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
