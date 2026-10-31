@@ -1,16 +1,60 @@
-import type { BatchResult } from './types.js';
+import type { SessionUsage } from './types.js';
 import { ClaudeCliEngine } from './engines/claude-cli.js';
 import { CodexCliEngine } from './engines/codex-cli.js';
+
+/** One agent session: the engine works in `cwd` and answers with JSON matching `schema`. */
+export interface SessionRequest {
+  /** For logs: "review" or "verification". */
+  label: string;
+  prompt: string;
+  schema: object;
+  /** The checkout the agent works in. */
+  cwd: string;
+  model: string;
+  timeoutMs: number;
+}
+
+export interface SessionResult<T> {
+  output: T;
+  usage: SessionUsage;
+}
 
 export interface ReviewEngine {
   readonly name: string;
   readonly defaultModel: string;
-  /** Reasoning effort used for every call. */
+  /** Reasoning effort used for every session. */
   readonly effort: string;
 
-  review(prompt: string, model: string): BatchResult;
-  synthesize(prompt: string, model: string): string;
+  run<T>(req: SessionRequest): SessionResult<T>;
 }
+
+/** The session ran past its time limit. Not retried: a second run would likely time out too. */
+export class SessionTimeoutError extends Error {
+  constructor(readonly label: string, readonly timeoutMs: number) {
+    super(`${label} session timed out after ${Math.round(timeoutMs / 60000)} min`);
+    this.name = 'SessionTimeoutError';
+  }
+}
+
+/** True when an execFileSync failure was its timeout firing. */
+export function isTimeout(err: unknown): boolean {
+  const e = err as NodeJS.ErrnoException & { signal?: string };
+  return e?.code === 'ETIMEDOUT' || e?.signal === 'SIGTERM';
+}
+
+// Passed through to the agent CLI; everything else (GH_TOKEN, CI secrets, the auth-token
+// file path, …) is dropped: the agent reads attacker-influenced text (ADR 0002)
+const ENV_ALLOW = /^(PATH|HOME|CODEX_HOME|CLAUDE_CONFIG_DIR|USER|LOGNAME|SHELL|LANG|LANGUAGE|TERM|TZ|TMPDIR|LC_\w+|XDG_\w+|(?:HTTPS?|NO|ALL)_PROXY|(?:https?|no|all)_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_(?:FILE|DIR))$/;
+
+/** The agent CLI's environment: the allowlisted host variables plus `extra`. */
+export function engineEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (ENV_ALLOW.test(k)) env[k] = v;
+  return { ...env, ...extra };
+}
+
+/** Read-only git subcommands the agent may run. */
+export const READ_ONLY_GIT = ['diff', 'log', 'show', 'blame', 'grep', 'ls-files', 'merge-base', 'rev-parse'];
 
 /**
  * The agent's subscription is out of quota. Retrying won't help until it

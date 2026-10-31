@@ -2,9 +2,17 @@ import { execFileSync } from 'child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { detectAuthError, detectUsageLimit, type ReviewEngine } from '../engine.js';
-import type { ReviewOutput, TokenUsage, BatchResult } from '../types.js';
-import { OUTPUT_SCHEMA } from '../claude.js';
+import {
+  detectAuthError,
+  detectUsageLimit,
+  engineEnv,
+  isTimeout,
+  SessionTimeoutError,
+  type ReviewEngine,
+  type SessionRequest,
+  type SessionResult,
+} from '../engine.js';
+import type { SessionUsage } from '../types.js';
 import { log } from '../logger.js';
 
 interface CodexEvent {
@@ -20,7 +28,7 @@ interface CodexEvent {
 }
 
 // OpenAI structured outputs require every object to declare additionalProperties: false
-function strictSchema(schema: unknown): unknown {
+export function strictSchema(schema: unknown): unknown {
   if (Array.isArray(schema)) return schema.map(strictSchema);
   if (!schema || typeof schema !== 'object') return schema;
   const out: Record<string, unknown> = {};
@@ -87,62 +95,68 @@ export class CodexCliEngine implements ReviewEngine {
     if (err) throw err;
   }
 
-  private run(prompt: string, model: string, schema: string | null, timeout: number): CodexEvent[] {
-    // Empty, read-only working dir: the diff is in the prompt, the agent has nothing to explore.
-    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-review-'));
-    // Credentials live in a separate dir, outside what the agent can browse — a prompt
-    // injection in the diff must not be able to read them back into the review.
+  run<T>(req: SessionRequest): SessionResult<T> {
+    log.debug(`Codex ${req.label} prompt:\n${req.prompt}`);
+
+    // Schema and credentials live outside the checkout. The read-only sandbox can still read
+    // them (no path rules), an accepted risk (ADR 0002)
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-session-'));
     const codexHome = this.auth ? fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-')) : null;
+    const started = Date.now();
     let raw: string;
     try {
+      const schemaPath = path.join(scratch, 'schema.json');
+      fs.writeFileSync(schemaPath, JSON.stringify(strictSchema(req.schema)));
       const args = [
         'exec',
-        '--model', model,
+        '--model', req.model,
         '-c', `model_reasoning_effort="${this.effort}"`,
+        // Network only through the web search / open-page tool; shell commands stay offline
+        '-c', 'web_search="live"',
+        // Don't auto-load the PR's AGENTS.md: repo guidance is read from the base branch
+        '-c', 'project_doc_max_bytes=0',
         '--json',
         '--ephemeral',
         '--skip-git-repo-check',
         '--ignore-user-config',
         '--sandbox', 'read-only',
-        '--cd', workDir,
+        '--cd', req.cwd,
+        '--output-schema', schemaPath,
+        '-',
       ];
-      if (schema) {
-        const schemaPath = path.join(workDir, 'schema.json');
-        fs.writeFileSync(schemaPath, JSON.stringify(strictSchema(JSON.parse(schema))));
-        args.push('--output-schema', schemaPath);
-      }
-      args.push('-');
 
-      const env = { ...process.env };
+      const extra: Record<string, string> = {};
       if (codexHome) {
         fs.chmodSync(codexHome, 0o700);
         fs.writeFileSync(path.join(codexHome, 'auth.json'), this.auth!, { mode: 0o600 });
-        env.CODEX_HOME = codexHome;
+        extra.CODEX_HOME = codexHome;
       }
 
       raw = execFileSync('codex', args, {
-        input: prompt,
+        input: req.prompt,
         encoding: 'utf8',
         stdio: ['pipe', 'pipe', 'pipe'],
-        maxBuffer: 10 * 1024 * 1024,
-        timeout,
-        env,
+        maxBuffer: 50 * 1024 * 1024,
+        timeout: req.timeoutMs,
+        env: engineEnv(extra),
       });
     } catch (err) {
+      if (isTimeout(err)) throw new SessionTimeoutError(req.label, req.timeoutMs);
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
       // codex exits non-zero when the turn fails; the reason is in its JSON events
       this.throwIfQuotaOrAuth(failureText(e.stdout, e.stderr));
       log.error(`codex CLI error: ${e.message}`);
       if (e.stderr) log.error(`stderr: ${e.stderr.trim()}`);
-      if (e.stdout) log.error(`stdout: ${e.stdout.trim()}`);
+      if (e.stdout) log.error(`stdout: ${e.stdout.trim().slice(0, 2000)}`);
       // Surface the turn's own failure message rather than "Command failed: codex exec …"
       const turnFailure = parseEvents(e.stdout ?? '').find((ev) => ev.type === 'turn.failed');
       if (turnFailure) throw new Error(`Codex returned an error: ${eventMessage(turnFailure)}`);
       throw err;
     } finally {
-      fs.rmSync(workDir, { recursive: true, force: true });
+      fs.rmSync(scratch, { recursive: true, force: true });
       if (codexHome) fs.rmSync(codexHome, { recursive: true, force: true });
     }
+    const durationMs = Date.now() - started;
 
     log.debug(`Codex raw events:\n${raw.trim()}`);
 
@@ -154,7 +168,25 @@ export class CodexCliEngine implements ReviewEngine {
       this.throwIfQuotaOrAuth(eventMessage(failure));
       throw new Error(`Codex returned an error: ${eventMessage(failure)}`);
     }
-    return events;
+
+    const text = this.lastMessage(events);
+    let output: T;
+    try {
+      output = JSON.parse(text) as T;
+    } catch {
+      log.error('[error] Codex result is not valid JSON:');
+      log.error(text.slice(0, 500));
+      throw new Error(`Failed to parse Codex ${req.label} JSON`);
+    }
+
+    // Usage is summed over turns; subscription usage has no per-call price
+    const usage: SessionUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUSD: null, durationMs };
+    for (const e of events.filter((ev) => ev.type === 'turn.completed' && ev.usage)) {
+      usage.inputTokens += e.usage!.input_tokens;
+      usage.outputTokens += e.usage!.output_tokens;
+      usage.cacheReadTokens += e.usage!.cached_input_tokens;
+    }
+    return { output, usage };
   }
 
   private lastMessage(events: CodexEvent[]): string {
@@ -165,46 +197,5 @@ export class CodexCliEngine implements ReviewEngine {
       throw new Error(`Codex produced no agent message${lastError ? ` (last error: ${lastError})` : ''}`);
     }
     return text;
-  }
-
-  review(prompt: string, model: string): BatchResult {
-    log.debug(`Codex prompt:\n${prompt}`);
-
-    const events = this.run(prompt, model, OUTPUT_SCHEMA, 5 * 60 * 1000);
-    const text = this.lastMessage(events);
-
-    let review: ReviewOutput;
-    try {
-      review = JSON.parse(text) as ReviewOutput;
-    } catch {
-      log.error('[error] Codex result is not valid JSON:');
-      log.error(text.slice(0, 500));
-      throw new Error('Failed to parse Codex review JSON');
-    }
-
-    log.debug(`Codex parsed ${review.comments.length} comment(s), verdict: ${review.verdict}`);
-    for (const c of review.comments) {
-      log.debug(`  [${c.severity}] ${c.path}:${c.line} — ${c.body}`);
-    }
-
-    const turnUsage = events.find((e) => e.type === 'turn.completed')?.usage;
-    // Subscription usage has no per-call price, so costUSD stays 0.
-    const usage: TokenUsage = {
-      inputTokens: turnUsage?.input_tokens ?? 0,
-      outputTokens: turnUsage?.output_tokens ?? 0,
-      cacheReadTokens: turnUsage?.cached_input_tokens ?? 0,
-      cacheCreationTokens: 0,
-      costUSD: 0,
-    };
-
-    return { review, usage };
-  }
-
-  synthesize(prompt: string, model: string): string {
-    log.debug(`Synthesis prompt:\n${prompt}`);
-
-    const summary = this.lastMessage(this.run(prompt, model, null, 2 * 60 * 1000)).trim();
-    log.debug(`Synthesized summary:\n${summary}`);
-    return summary;
   }
 }

@@ -1,20 +1,29 @@
-import type { PrRef, PrData, ReviewComment, ReviewOutput } from './types.js';
-import type { ReviewHistory } from './review-history.js';
+import type { Finding, IssueRef, LinkedIssue, PrRef, PrData, ReviewPost } from './types.js';
+import type { PriorThread, ReviewHistory } from './review-history.js';
 import { GitHubProvider } from './providers/github.js';
 import { GitLabProvider } from './providers/gitlab.js';
+
+/** A follow-up on one of pr-audit's own threads: a reply, optionally resolving it. */
+export interface FollowUpPost {
+  thread: PriorThread;
+  body: string;
+  resolve: boolean;
+}
 
 export interface GitProvider {
   readonly name: string;
   readonly reviewTerm: string;
 
   fetchPr(ref: PrRef): PrData;
-  postReview(
-    ref: PrRef,
-    headSha: string,
-    review: ReviewOutput,
-    comments: ReviewComment[],
-    dryRun?: boolean,
-  ): void;
+  /** Clone the repo into `dir` with the provider's CLI (so private repos work with its auth). */
+  cloneRepo(ref: PrRef, dir: string): void;
+  /** An issue's content, or null if it doesn't exist or is a PR. `closes` is filled in by the caller. */
+  fetchIssue(issue: IssueRef): Omit<LinkedIssue, 'closes'> | null;
+
+  /** Post the review: inline findings on their lines, `threaded` general findings as their own threads. */
+  postReview(ref: PrRef, headSha: string, review: ReviewPost, dryRun?: boolean): void;
+  /** Whether this general finding can be its own thread here; the rest go in the review body. */
+  threadsGeneralFinding(finding: Finding, prPaths: string[]): boolean;
 
   /**
    * Report that no review was produced (e.g. the agent's usage limit was hit):
@@ -24,11 +33,11 @@ export interface GitProvider {
 
   /**
    * Incremental reviews (optional; providers without them always review the full diff):
-   * what earlier pr-audit reviews covered and commented, and the diff since then.
+   * what earlier pr-audit reviews covered and left open.
    */
   fetchReviewHistory?(ref: PrRef): ReviewHistory;
-  /** Unified diff `fromSha..headSha`, or null when fromSha isn't an ancestor of headSha (e.g. after a force-push). */
-  fetchDiffSince?(ref: PrRef, fromSha: string, headSha: string): string | null;
+  /** Reply to (and resolve) pr-audit's own earlier threads. */
+  applyFollowUps?(ref: PrRef, posts: FollowUpPost[], dryRun?: boolean): void;
 }
 
 interface ResolvedProvider {

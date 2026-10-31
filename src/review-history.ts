@@ -1,30 +1,40 @@
-import type { ReviewOutput } from './types.js';
+import { KINDS, SEVERITIES, type Finding, type Severity } from './types.js';
 
 /**
- * What earlier pr-audit runs left on a PR: the commit the last review covered
- * (from a hidden marker in its body) and its inline comment threads.
+ * What earlier pr-audit runs left on a PR: the commit the last review covered and the
+ * general findings it kept in its body (hidden markers), and its threads.
  */
 
 export interface PriorThread {
+  /** Provider id of the thread's first comment. */
+  id: string;
   path: string;
+  /** null for file-level threads and outdated ones. */
   line: number | null;
-  /** The pr-audit comment, e.g. "**[warning]** …". */
+  /** The pr-audit comment, e.g. "**[warning · bug]** …". */
   body: string;
   /** Replies, oldest first. */
   replies: { author: string; body: string }[];
   /** Marked resolved on the platform. */
   resolved: boolean;
-  /** The lines it points at have changed since (GitHub: \`line\` is null). */
+  /** The lines it points at have changed since. */
   outdated: boolean;
+  /** Provider handle needed to resolve the thread (GitHub: GraphQL thread node id). */
+  resolveId?: string;
 }
 
 export interface ReviewHistory {
   /** Head SHA the last pr-audit review covered, or null if there is none. */
   lastSha: string | null;
   threads: PriorThread[];
+  /** General findings the last review kept in its body. */
+  bodyFindings: Finding[];
 }
 
+export const EMPTY_HISTORY: ReviewHistory = { lastSha: null, threads: [], bodyFindings: [] };
+
 const MARKER = /<!-- pr-audit:sha=([0-9a-f]{7,40}) -->/;
+const GENERAL_MARKER = /<!-- pr-audit:general=([A-Za-z0-9+/=]*) -->/;
 
 /** Hidden marker appended to every review body, recording the commit it covers. */
 export function reviewMarker(headSha: string): string {
@@ -35,72 +45,92 @@ export function parseReviewMarker(body: string | null | undefined): string | nul
   return MARKER.exec(body ?? '')?.[1] ?? null;
 }
 
-// pr-audit's inline comments start with the severity tag (see postReview)
-const PR_AUDIT_COMMENT = /^\*\*\[(?:critical|warning|suggestion)\]\*\*/;
+/** Hidden marker carrying the body findings, so the next review can re-check them. */
+export function generalMarker(findings: Finding[]): string {
+  const data = findings.map(({ severity, kind, body }) => ({ severity, kind, body }));
+  return `<!-- pr-audit:general=${Buffer.from(JSON.stringify(data)).toString('base64')} -->`;
+}
+
+export function parseGeneralMarker(body: string | null | undefined): Finding[] {
+  const m = GENERAL_MARKER.exec(body ?? '');
+  if (!m) return [];
+  try {
+    const data = JSON.parse(Buffer.from(m[1], 'base64').toString('utf8')) as Partial<Finding>[];
+    return data
+      .filter((f) => SEVERITIES.includes(f.severity as Severity) && typeof f.body === 'string')
+      .map((f) => ({
+        path: null,
+        line: null,
+        severity: f.severity as Severity,
+        kind: KINDS.includes(f.kind as Finding['kind']) ? (f.kind as Finding['kind']) : 'bug',
+        body: f.body as string,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/** The tag every pr-audit finding comment starts with, e.g. "**[warning · question]**". */
+export function findingTag(f: Pick<Finding, 'severity' | 'kind'>): string {
+  return `**[${f.severity} · ${f.kind}]**`;
+}
+
+// Current tag, and the severity-only tag of reviews before kinds existed
+const PR_AUDIT_COMMENT = /^\*\*\[(critical|warning|suggestion)(?: · [a-z]+)?\]\*\*/;
 
 export function isPrAuditComment(body: string): boolean {
   return PR_AUDIT_COMMENT.test(body);
 }
 
-function status(t: PriorThread): string {
+export function threadSeverity(t: Pick<PriorThread, 'body'>): Severity | null {
+  return (PR_AUDIT_COMMENT.exec(t.body)?.[1] as Severity | undefined) ?? null;
+}
+
+export function threadStatus(t: PriorThread): 'open' | 'resolved' | 'outdated' {
   return t.resolved ? 'resolved' : t.outdated ? 'outdated' : 'open';
 }
 
-export interface OpenFindings {
-  critical: number;
-  warning: number;
+/** Open threads on files still in the PR: the ones the review follows up on and the verdict counts. */
+export function openThreads(threads: PriorThread[], paths: string[]): PriorThread[] {
+  return threads.filter((t) => paths.includes(t.path) && threadStatus(t) === 'open');
 }
 
-/** Earlier critical/warning threads on `paths` that are neither resolved nor outdated. */
-export function countOpenFindings(threads: PriorThread[], paths: string[]): OpenFindings {
-  const open = threads.filter((t) => paths.includes(t.path) && status(t) === 'open');
-  return {
-    critical: open.filter((t) => t.body.startsWith('**[critical]**')).length,
-    warning: open.filter((t) => t.body.startsWith('**[warning]**')).length,
-  };
-}
-
-/**
- * The agent is told not to repeat earlier findings, so it may approve while they're still open.
- * Open critical findings keep the verdict at REQUEST_CHANGES, open warnings at COMMENT.
- */
-export function holdForOpenFindings(
-  verdict: ReviewOutput['verdict'],
-  open: OpenFindings,
-): { verdict: ReviewOutput['verdict']; note: string | null } {
-  const total = open.critical + open.warning;
-  if (total === 0) return { verdict, note: null };
-  const held = open.critical ? 'REQUEST_CHANGES' : verdict === 'APPROVE' ? 'COMMENT' : verdict;
-  const counts = [open.critical && `${open.critical} critical`, open.warning && `${open.warning} warning`]
-    .filter(Boolean)
-    .join(', ');
-  return {
-    verdict: held,
-    note: `${total} earlier finding(s) still open (${counts}). Resolve those threads, or push a fix that changes the lines they point at.`,
-  };
-}
-
-const MAX_BODY = 300;
-const MAX_REPLY = 200;
-const MAX_REPLIES = 3;
-const MAX_THREADS = 50;
+const MAX_BODY = 1500;
+const MAX_REPLY = 800;
+const MAX_REPLIES = 5;
+const MAX_CLOSED = 50;
 
 function clip(text: string, max: number): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }
 
-/** Prompt section listing earlier threads on `paths`, or '' if there are none. */
-export function renderPriorThreads(threads: PriorThread[], paths: string[]): string {
-  // Most recent last; cap so a long-running PR doesn't crowd out the diff
-  const relevant = threads.filter((t) => paths.includes(t.path)).slice(-MAX_THREADS);
-  if (relevant.length === 0) return '';
-  const lines = relevant.map((t) => {
-    const replies = t.replies
-      .slice(-MAX_REPLIES)
-      .map((r) => `\n    ↳ ${r.author}: ${clip(r.body, MAX_REPLY)}`)
-      .join('');
-    return `- ${t.path}${t.line ? `:${t.line}` : ''} (${status(t)}) ${clip(t.body, MAX_BODY)}${replies}`;
-  });
-  return lines.join('\n');
+function firstSentence(text: string): string {
+  const flat = text.replace(PR_AUDIT_COMMENT, '').replace(/\s+/g, ' ').trim();
+  const m = /^(.{1,160}?[.!?])(\s|$)/.exec(flat);
+  return m ? m[1] : clip(flat, 160);
+}
+
+const where = (t: PriorThread) => `${t.path}${t.line ? `:${t.line}` : ''}`;
+
+/** Open threads in full with their ids (T1, T2, …) and replies. */
+export function renderOpenThreads(threads: { id: string; thread: PriorThread }[]): string {
+  return threads
+    .map(({ id, thread: t }) => {
+      const replies = t.replies
+        .slice(-MAX_REPLIES)
+        .map((r) => `\n    ↳ ${r.author}: ${clip(r.body, MAX_REPLY)}`)
+        .join('');
+      return `- ${id} ${where(t)}${t.line === null ? ' (file)' : ''}: ${clip(t.body, MAX_BODY)}${replies}`;
+    })
+    .join('\n');
+}
+
+/** Resolved and outdated threads, one line each, so they aren't raised again. */
+export function renderClosedThreads(threads: PriorThread[], paths: string[]): string {
+  return threads
+    .filter((t) => paths.includes(t.path) && threadStatus(t) !== 'open')
+    .slice(-MAX_CLOSED)
+    .map((t) => `- ${where(t)} (${threadStatus(t)}) ${firstSentence(t.body)}`)
+    .join('\n');
 }

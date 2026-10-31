@@ -10,15 +10,27 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'child_process';
 import { CodexCliEngine } from '../../src/engines/codex-cli.js';
-import { AgentAuthError, UsageLimitError } from '../../src/engine.js';
+import { AgentAuthError, SessionTimeoutError, UsageLimitError, type SessionRequest } from '../../src/engine.js';
+import { REVIEW_SCHEMA } from '../../src/prompt.js';
 
 const mockExec = vi.mocked(execFileSync);
 
 const REVIEW = {
   summary: 'Looks risky.',
-  verdict: 'REQUEST_CHANGES',
-  comments: [{ path: 'a.ts', line: 3, severity: 'critical', body: 'SQL injection' }],
+  findings: [{ path: 'a.ts', line: 3, severity: 'critical', kind: 'security', body: 'SQL injection' }],
+  follow_ups: [],
 };
+
+const CHECKOUT = fs.mkdtempSync(path.join(os.tmpdir(), 'checkout-'));
+const req = (over: Partial<SessionRequest> = {}): SessionRequest => ({
+  label: 'review',
+  prompt: 'prompt',
+  schema: REVIEW_SCHEMA,
+  cwd: CHECKOUT,
+  model: 'gpt-test',
+  timeoutMs: 60_000,
+  ...over,
+});
 
 function events(text: string): string {
   return [
@@ -41,25 +53,52 @@ describe('CodexCliEngine', () => {
       return events(JSON.stringify(REVIEW));
     }) as typeof execFileSync);
 
-    const result = new CodexCliEngine().review('prompt', 'gpt-test');
+    const result = new CodexCliEngine().run(req());
 
-    const [cmd, args, opts] = mockExec.mock.calls[0] as [string, string[], { input: string; env: NodeJS.ProcessEnv }];
+    const [cmd, args, opts] = mockExec.mock.calls[0] as [string, string[], { input: string; env: NodeJS.ProcessEnv; timeout: number }];
     expect(cmd).toBe('codex');
     expect(args).toEqual(expect.arrayContaining(['exec', '--model', 'gpt-test', '--json', '--sandbox', 'read-only']));
     expect(args[args.indexOf('-c') + 1]).toBe('model_reasoning_effort="medium"');
+    expect(args).toEqual(expect.arrayContaining(['-c', 'web_search="live"', '-c', 'project_doc_max_bytes=0']));
+    expect(args[args.indexOf('--cd') + 1]).toBe(CHECKOUT);
     expect(opts.input).toBe('prompt');
-    expect(opts.env.CODEX_HOME).toBe(process.env.CODEX_HOME);
+    expect(opts.timeout).toBe(60_000);
     expect(schema?.additionalProperties).toBe(false);
-    expect((schema?.properties as any).comments.items.additionalProperties).toBe(false);
+    expect((schema?.properties as any).findings.items.additionalProperties).toBe(false);
+    // the schema file is not written into the checkout
+    expect(fs.readdirSync(CHECKOUT)).toEqual([]);
 
-    expect(result.review).toEqual(REVIEW);
-    expect(result.usage).toEqual({
+    expect(result.output).toEqual(REVIEW);
+    expect(result.usage).toMatchObject({
       inputTokens: 120,
       outputTokens: 30,
       cacheReadTokens: 20,
       cacheCreationTokens: 0,
-      costUSD: 0,
+      costUSD: null,
     });
+  });
+
+  it('keeps secrets out of the agent environment', () => {
+    process.env.GH_TOKEN = 'ghp_secret';
+    process.env.PR_AUDIT_AUTH_TOKEN = 'tok';
+    try {
+      mockExec.mockReturnValue(events(JSON.stringify(REVIEW)));
+      new CodexCliEngine().run(req());
+      const env = (mockExec.mock.calls[0][2] as { env: NodeJS.ProcessEnv }).env;
+      expect(env.GH_TOKEN).toBeUndefined();
+      expect(env.PR_AUDIT_AUTH_TOKEN).toBeUndefined();
+      expect(env.PATH).toBe(process.env.PATH);
+    } finally {
+      delete process.env.GH_TOKEN;
+      delete process.env.PR_AUDIT_AUTH_TOKEN;
+    }
+  });
+
+  it('turns a timeout into SessionTimeoutError', () => {
+    mockExec.mockImplementation(() => {
+      throw Object.assign(new Error('spawnSync codex ETIMEDOUT'), { code: 'ETIMEDOUT' });
+    });
+    expect(() => new CodexCliEngine().run(req())).toThrow(SessionTimeoutError);
   });
 
   it('writes auth.json into a temp CODEX_HOME when an auth token is given', () => {
@@ -72,14 +111,12 @@ describe('CodexCliEngine', () => {
       return events(JSON.stringify(REVIEW));
     }) as typeof execFileSync);
 
-    new CodexCliEngine(auth).review('prompt', 'gpt-test');
+    new CodexCliEngine(auth).run(req());
 
     expect(written).toBe(auth);
     expect(fs.existsSync(codexHome)).toBe(false);
-    // auth.json must not be inside the directory the agent works in
-    const args = mockExec.mock.calls[0][1] as string[];
-    const workDir = args[args.indexOf('--cd') + 1];
-    expect(path.relative(workDir, codexHome).startsWith('..')).toBe(true);
+    // auth.json must not be inside the checkout the agent works in
+    expect(path.relative(CHECKOUT, codexHome).startsWith('..')).toBe(true);
   });
 
   it('wraps a bare API key as OPENAI_API_KEY', () => {
@@ -89,7 +126,7 @@ describe('CodexCliEngine', () => {
       return events(JSON.stringify(REVIEW));
     }) as typeof execFileSync);
 
-    new CodexCliEngine('sk-test').review('prompt', 'gpt-test');
+    new CodexCliEngine('sk-test').run(req());
 
     expect(JSON.parse(written)).toEqual({ OPENAI_API_KEY: 'sk-test' });
   });
@@ -98,20 +135,12 @@ describe('CodexCliEngine', () => {
     mockExec.mockReturnValue(
       JSON.stringify({ type: 'error', message: 'Reconnecting... 1/5' }) + '\n' + events(JSON.stringify(REVIEW)),
     );
-    expect(new CodexCliEngine().review('prompt', 'gpt-test').review).toEqual(REVIEW);
+    expect(new CodexCliEngine().run(req()).output).toEqual(REVIEW);
   });
 
   it('throws when the turn fails', () => {
     mockExec.mockReturnValue(JSON.stringify({ type: 'turn.failed', error: { message: 'quota exceeded' } }));
-    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow('quota exceeded');
-  });
-
-  it('synthesize returns the last agent message without a schema', () => {
-    mockExec.mockReturnValue(events('  Combined summary.  '));
-
-    expect(new CodexCliEngine().synthesize('prompt', 'gpt-test')).toBe('Combined summary.');
-    const args = mockExec.mock.calls[0][1] as string[];
-    expect(args).not.toContain('--output-schema');
+    expect(() => new CodexCliEngine().run(req())).toThrow('quota exceeded');
   });
 
   it('throws UsageLimitError when codex exits with a usage-limit turn failure', () => {
@@ -121,7 +150,7 @@ describe('CodexCliEngine', () => {
       err.stderr = '';
       throw err;
     });
-    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow(UsageLimitError);
+    expect(() => new CodexCliEngine().run(req())).toThrow(UsageLimitError);
   });
 
   it('throws AgentAuthError when codex exits on a 401', () => {
@@ -134,8 +163,8 @@ describe('CodexCliEngine', () => {
       err.stderr = '';
       throw err;
     });
-    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow(AgentAuthError);
-    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow(/failed: workspace routing discovery unauthorized \(401\) —/);
+    expect(() => new CodexCliEngine().run(req())).toThrow(AgentAuthError);
+    expect(() => new CodexCliEngine().run(req())).toThrow(/failed: workspace routing discovery unauthorized \(401\) —/);
   });
 
   it('does not treat a usage-limit or auth phrase in an agent message as a failure reason', () => {
@@ -148,7 +177,7 @@ describe('CodexCliEngine', () => {
       err.stderr = '';
       throw err;
     });
-    expect(() => new CodexCliEngine().review('prompt', 'gpt-test')).toThrow('Codex returned an error: stream disconnected before completion');
+    expect(() => new CodexCliEngine().run(req())).toThrow('Codex returned an error: stream disconnected before completion');
   });
 
   it('rejects JSON auth without tokens or an API key up front, before creating temp dirs', () => {
