@@ -53,15 +53,19 @@ export function engineEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv
   return { ...env, ...extra };
 }
 
-/** Read-only git subcommands the agent may run (search is the engine's own tool, not `git grep -O<cmd>`). */
-export const READ_ONLY_GIT = ['diff', 'log', 'show', 'blame', 'ls-files', 'merge-base', 'rev-parse'];
+/**
+ * Read-only git subcommands the agent may run. Not `grep` (`-O<cmd>` runs a command), `blame`
+ * (`--contents` / `-S` read any file, and it accepts abbreviated options) or `ls-files`
+ * (`--exclude-from`): the engine's own search / glob tools and `git log -L` cover them.
+ */
+export const READ_ONLY_GIT = ['diff', 'log', 'show', 'merge-base', 'rev-parse'];
 
 /**
- * Flags that turn those subcommands into writes, command execution or reads outside the
- * checkout: `--output=<file>`, `-O`/`--open-files-in-pager`, `--no-index` and `blame --contents`
- * (any file on disk, e.g. the engine's credentials), external diff drivers.
+ * Flags that turn those subcommands into writes or reads outside the checkout: `--output=<file>`,
+ * `-O<orderfile>`, `--no-index` (any file on disk, e.g. the engine's credentials), external diff
+ * drivers. diff / log / show reject abbreviated long options, so substring rules are enough.
  */
-export const GIT_DENIED_FLAGS = ['--output', '-O', '--open-files-in-pager', '--no-index', '--contents', '--ext-diff'];
+export const GIT_DENIED_FLAGS = ['--output', '-O', '--no-index', '--ext-diff'];
 
 /**
  * The agent's subscription is out of quota. Retrying won't help until it

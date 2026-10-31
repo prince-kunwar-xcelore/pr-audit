@@ -70,8 +70,8 @@ describe('ClaudeCliEngine sessions', () => {
     expect(allowed.some((t) => /Bash\((?!git )/.test(t) || t === 'Bash' || t === 'Edit' || t === 'Write')).toBe(false);
     // flags that would turn read-only git into writes, command execution or reads outside the checkout
     const denied = args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--allowedTools'));
-    expect(denied).toEqual(expect.arrayContaining(['Bash(git *--output*)', 'Bash(git *-O*)', 'Bash(git *--no-index*)', 'Bash(git *--contents*)']));
-    expect(allowed).not.toContain('Bash(git grep:*)');
+    expect(denied).toEqual(expect.arrayContaining(['Bash(git *--output*)', 'Bash(git *-O*)', 'Bash(git *--no-index*)']));
+    for (const cmd of ['grep', 'blame', 'ls-files']) expect(allowed).not.toContain(`Bash(git ${cmd}:*)`);
     expect(JSON.parse(args[args.indexOf('--json-schema') + 1])).toEqual(REVIEW_SCHEMA);
     expect(opts.cwd).toBe('/tmp');
     expect(opts.input).toBe('prompt');
