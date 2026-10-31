@@ -279,7 +279,9 @@ export class GitHubProvider implements GitProvider {
         );
         log.info(`Replied on ${where} and resolved it`);
       } catch (err) {
-        log.warn(`[warn] Replied on ${where} but could not resolve the thread: ${(err as Error).message.split('\n')[0]}`);
+        const e = err as Error & { stdout?: string; stderr?: string };
+        const why = `${e.stdout ?? ''} ${e.stderr ?? ''}`.trim() || e.message.split('\n')[0];
+        log.warn(`[warn] Replied on ${where} but could not resolve the thread: ${why.slice(0, 400)}`);
       }
     }
   }
