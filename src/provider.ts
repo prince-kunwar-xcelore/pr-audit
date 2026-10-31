@@ -20,10 +20,12 @@ export interface GitProvider {
   /** An issue's content, or null if it doesn't exist or is a PR. `closes` is filled in by the caller. */
   fetchIssue(issue: IssueRef): Omit<LinkedIssue, 'closes'> | null;
 
-  /** Post the review: inline findings on their lines, `threaded` general findings as their own threads. */
+  /** Post the review: the summary, the verdict, and inline findings on their lines. */
   postReview(ref: PrRef, headSha: string, review: ReviewPost, dryRun?: boolean): void;
   /** Whether this general finding can be its own thread here; the rest go in the review body. */
   threadsGeneralFinding(finding: Finding, prPaths: string[]): boolean;
+  /** Post a general finding as its own thread (before the review). Throws on failure; the caller moves it to the body. */
+  postGeneralThread(ref: PrRef, headSha: string, finding: Finding, dryRun?: boolean): void;
 
   /**
    * Report that no review was produced (e.g. the agent's usage limit was hit):

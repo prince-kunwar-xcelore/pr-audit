@@ -45,9 +45,15 @@ export function parseReviewMarker(body: string | null | undefined): string | nul
   return MARKER.exec(body ?? '')?.[1] ?? null;
 }
 
+// Keeps the marker well under GitHub's 65536-character review body limit
+const MAX_MARKER_FINDINGS = 20;
+const MAX_MARKER_BODY = 600;
+
 /** Hidden marker carrying the body findings, so the next review can re-check them. */
 export function generalMarker(findings: Finding[]): string {
-  const data = findings.map(({ severity, kind, body }) => ({ severity, kind, body }));
+  const data = findings
+    .slice(0, MAX_MARKER_FINDINGS)
+    .map(({ severity, kind, body }) => ({ severity, kind, body: body.length > MAX_MARKER_BODY ? `${body.slice(0, MAX_MARKER_BODY)}…` : body }));
   return `<!-- pr-audit:general=${Buffer.from(JSON.stringify(data)).toString('base64')} -->`;
 }
 

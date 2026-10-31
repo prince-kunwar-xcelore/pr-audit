@@ -21,6 +21,7 @@ import { runReview, type ReviewOutcome, type SessionReport, type Workspace } fro
 /** Default session time limits, in minutes. */
 export const DEFAULT_REVIEW_TIMEOUT_MIN = 20;
 export const DEFAULT_VERIFY_TIMEOUT_MIN = 10;
+const MAX_TIMEOUT_MIN = 240;
 
 /** Exit code when the review is skipped because the agent's usage limit was hit. */
 export const EXIT_USAGE_LIMIT = 3;
@@ -184,8 +185,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const reviewTimeoutMin = timeoutArg ? Number(timeoutArg) : DEFAULT_REVIEW_TIMEOUT_MIN;
-  if (!Number.isFinite(reviewTimeoutMin) || reviewTimeoutMin <= 0) {
-    console.error('Error: --timeout must be a positive number of minutes');
+  if (!Number.isFinite(reviewTimeoutMin) || reviewTimeoutMin <= 0 || reviewTimeoutMin > MAX_TIMEOUT_MIN) {
+    console.error(`Error: --timeout must be a number of minutes between 0 and ${MAX_TIMEOUT_MIN}`);
     process.exit(1);
   }
   const verifyTimeoutMin = timeoutArg ? reviewTimeoutMin / 2 : DEFAULT_VERIFY_TIMEOUT_MIN;

@@ -5,6 +5,7 @@ vi.mock('child_process', () => ({
   execFileSync: vi.fn(),
 }));
 
+import os from 'node:os';
 import { execFileSync } from 'child_process';
 import { ClaudeCliEngine } from '../../src/engines/claude-cli.js';
 import { AgentAuthError, type SessionRequest } from '../../src/engine.js';
@@ -67,6 +68,10 @@ describe('ClaudeCliEngine sessions', () => {
     const allowed = args.slice(args.indexOf('--allowedTools') + 1);
     expect(allowed).toEqual(expect.arrayContaining(['Read', 'WebFetch', 'Bash(git diff:*)', 'Bash(git show:*)']));
     expect(allowed.some((t) => /Bash\((?!git )/.test(t) || t === 'Bash' || t === 'Edit' || t === 'Write')).toBe(false);
+    // flags that would turn read-only git into writes, command execution or reads outside the checkout
+    const denied = args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--allowedTools'));
+    expect(denied).toEqual(expect.arrayContaining(['Bash(git *--output*)', 'Bash(git *-O*)', 'Bash(git *--no-index*)', 'Bash(git *--contents*)']));
+    expect(allowed).not.toContain('Bash(git grep:*)');
     expect(JSON.parse(args[args.indexOf('--json-schema') + 1])).toEqual(REVIEW_SCHEMA);
     expect(opts.cwd).toBe('/tmp');
     expect(opts.input).toBe('prompt');
@@ -90,6 +95,6 @@ describe('ClaudeCliEngine sessions', () => {
       delete process.env.GH_TOKEN;
     }
     expect(home).not.toBe(process.env.HOME);
-    expect(home.startsWith('/tmp')).toBe(true);
+    expect(home.startsWith(os.tmpdir())).toBe(true);
   });
 });

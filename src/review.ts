@@ -241,7 +241,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutcome> {
   let findings = sanitizeFindings(review.output.findings);
   const threadById = new Map(open.map((o) => [o.id, o.thread]));
   let followUps: FollowUp[] = (Array.isArray(review.output.follow_ups) ? review.output.follow_ups : []).filter(
-    (f) => threadById.has(f.thread) && ['resolve_fixed', 'resolve_answered', 'reply'].includes(f.action) && f.body?.trim(),
+    (f) => !!f && typeof f === 'object' && threadById.has(f.thread) && ['resolve_fixed', 'resolve_answered', 'reply'].includes(f.action) && f.body?.trim(),
   );
   log.info(`  Candidate findings: ${findings.length} · follow-ups: ${followUps.length}`);
   for (const f of findings) log.debug(`  ${findingTag(f)} ${f.path ?? '(general)'}${f.line ? `:${f.line}` : ''} — ${f.body}`);
@@ -264,10 +264,10 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutcome> {
       );
       sessions.push({ label: 'verification', usage: verified.usage });
       logUsage('verification', verified.usage);
-      findings = applyVerification(candidates, Array.isArray(verified.output.findings) ? verified.output.findings : []);
+      findings = applyVerification(candidates, (Array.isArray(verified.output.findings) ? verified.output.findings : []).filter((d) => !!d && typeof d === 'object'));
       const rejected = new Set(
         (Array.isArray(verified.output.follow_ups) ? verified.output.follow_ups : [])
-          .filter((v) => !v.confirmed)
+          .filter((v) => !!v && typeof v === 'object' && !v.confirmed)
           .map((v) => {
             log.info(`  ${v.thread} stays open: ${v.reason}`);
             return v.thread;
@@ -282,10 +282,24 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutcome> {
     }
   }
 
-  // Placement
+  // Placement: general findings become their own threads where possible, the rest (and any
+  // whose thread fails to post) go in the body, where the marker carries them to the next review
   const { inline, general } = placeFindings(findings, prFiles);
-  const threaded = general.filter((f) => provider.threadsGeneralFinding(f, prPaths));
-  const body = general.filter((f) => !threaded.includes(f));
+  const threaded: Finding[] = [];
+  const body: Finding[] = [];
+  for (const f of general) {
+    if (!provider.threadsGeneralFinding(f, prPaths)) {
+      body.push(f);
+      continue;
+    }
+    try {
+      provider.postGeneralThread(ref, pr.headSha, f, options.dryRun);
+      threaded.push(f);
+    } catch (err) {
+      log.warn(`[warn] Could not post a general finding as a thread — keeping it in the review body (${(err as Error).message.split('\n')[0]})`);
+      body.push(f);
+    }
+  }
 
   // Verdict: this review's findings plus earlier blocking threads that stay open
   const resolvedIds = new Set(followUps.filter((f) => f.action !== 'reply').map((f) => f.thread));
@@ -316,7 +330,7 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutcome> {
 
   log.section(options.dryRun ? 'DRY-RUN: REVIEW PREVIEW' : 'POSTING REVIEW');
   log.info(`${options.dryRun ? 'Previewing' : 'Posting'} review (${verdict}): ${inline.length} inline, ${threaded.length} general thread(s), ${body.length} in the body`);
-  provider.postReview(ref, pr.headSha, { summary: parts.join('\n\n'), verdict, inline, threaded }, options.dryRun);
+  provider.postReview(ref, pr.headSha, { summary: parts.join('\n\n'), verdict, inline }, options.dryRun);
 
   if (followUps.length && provider.applyFollowUps) {
     const posts: FollowUpPost[] = followUps.map((f) => ({

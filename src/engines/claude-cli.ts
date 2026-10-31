@@ -7,6 +7,7 @@ import {
   detectUsageLimit,
   engineEnv,
   isTimeout,
+  GIT_DENIED_FLAGS,
   READ_ONLY_GIT,
   SessionTimeoutError,
   type ReviewEngine,
@@ -112,6 +113,8 @@ export class ClaudeCliEngine implements ReviewEngine {
       '--restricted', '--safe-mode', '--strict-mcp-config',
       '--permission-prompts', 'none',
       '--tools', 'Read,Grep,Glob,Bash,WebFetch,WebSearch',
+      // Deny rules beat the allow rules below: `git diff:*` alone would also allow `--output=<file>` etc.
+      '--disallowedTools', ...GIT_DENIED_FLAGS.map((f) => `Bash(git *${f}*)`),
       // Variadic, so last; anything not allowed here is denied
       '--allowedTools', 'Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch',
       ...READ_ONLY_GIT.map((c) => `Bash(git ${c}:*)`),

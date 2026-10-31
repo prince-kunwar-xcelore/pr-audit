@@ -108,30 +108,33 @@ export class GitLabProvider implements GitProvider {
     }
     const mrPath = `${project(ref.slug)}/merge_requests/${ref.number}`;
 
+    // GitLab posts each discussion separately: one rejected position must not lose the review
+    const unposted: string[] = [];
     for (const c of review.inline) {
-      this.callApi(
-        `${mrPath}/discussions`,
-        {
-          body: `${findingTag(c)} ${c.body}`,
-          position: {
-            base_sha: this.diffRefs.base_sha,
-            start_sha: this.diffRefs.start_sha,
-            head_sha: headSha,
-            position_type: 'text',
-            new_path: c.path,
-            new_line: c.line,
+      try {
+        this.callApi(
+          `${mrPath}/discussions`,
+          {
+            body: `${findingTag(c)} ${c.body}`,
+            position: {
+              base_sha: this.diffRefs.base_sha,
+              start_sha: this.diffRefs.start_sha,
+              head_sha: headSha,
+              position_type: 'text',
+              new_path: c.path,
+              new_line: c.line,
+            },
           },
-        },
-        `discussion on ${c.path}:${c.line}`,
-        dryRun,
-      );
-    }
-    for (const c of review.threaded) {
-      const where = c.path ? `\`${c.path}\`: ` : '';
-      this.callApi(`${mrPath}/discussions`, { body: `${findingTag(c)} ${where}${c.body}` }, 'general discussion', dryRun);
+          `discussion on ${c.path}:${c.line}`,
+          dryRun,
+        );
+      } catch {
+        unposted.push(`- ${findingTag(c)} \`${c.path}:${c.line}\`: ${c.body}`);
+      }
     }
 
-    const summaryBody = review.verdict === 'REQUEST_CHANGES' ? `## Changes Requested\n\n${review.summary}` : review.summary;
+    const summary = unposted.length ? `${review.summary}\n\n### Findings that could not be posted inline\n${unposted.join('\n')}` : review.summary;
+    const summaryBody = review.verdict === 'REQUEST_CHANGES' ? `## Changes Requested\n\n${summary}` : summary;
     this.callApi(`${mrPath}/notes`, { body: summaryBody }, 'summary note', dryRun);
 
     if (review.verdict === 'APPROVE') {
@@ -139,7 +142,17 @@ export class GitLabProvider implements GitProvider {
     }
 
     const prefix = dryRun ? '[dry-run] Review NOT posted' : 'Review posted';
-    log.info(`${prefix}: ${review.verdict} (${review.inline.length} inline, ${review.threaded.length} general discussion(s))`);
+    log.info(`${prefix}: ${review.verdict} (${review.inline.length - unposted.length} inline discussion(s))`);
+  }
+
+  postGeneralThread(ref: PrRef, _headSha: string, finding: Finding, dryRun = false): void {
+    const where = finding.path ? `\`${finding.path}\`: ` : '';
+    this.callApi(
+      `${project(ref.slug)}/merge_requests/${ref.number}/discussions`,
+      { body: `${findingTag(finding)} ${where}${finding.body}` },
+      'general discussion',
+      dryRun,
+    );
   }
 
   reportSkipped(ref: PrRef, _headSha: string, _title: string, body: string, dryRun = false): void {

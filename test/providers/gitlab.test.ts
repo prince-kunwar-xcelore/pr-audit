@@ -108,13 +108,27 @@ describe('GitLabProvider', () => {
     });
   });
 
+  describe('inline failures', () => {
+    it('keeps posting and lists findings GitLab rejected in the summary note', () => {
+      const provider = setupProvider();
+      mockExec.mockImplementationOnce(() => { throw new Error('400 position invalid'); }).mockReturnValue('{}');
+      provider.postReview({ slug: 'group/project', number: 1 }, 'head-sha', {
+        summary: 's', verdict: 'COMMENT',
+        inline: [
+          { path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'rejected one' },
+          { path: 'a.ts', line: 6, severity: 'warning', kind: 'bug', body: 'posted one' },
+        ],
+      });
+      expect(mockExec).toHaveBeenCalledTimes(3);
+      expect(getPayload(mockExec.mock.calls[2]).body).toContain('### Findings that could not be posted inline\n- **[warning · bug]** `a.ts:5`: rejected one');
+    });
+  });
+
   describe('general findings', () => {
     it('posts them as MR discussions without a position', () => {
       const provider = setupProvider();
-      provider.postReview({ slug: 'group/project', number: 1 }, 'head-sha', {
-        summary: 's', verdict: 'COMMENT', inline: [],
-        threaded: [{ path: 'b.ts', line: null, severity: 'suggestion', kind: 'cleanup', body: 'dead code' }],
-      });
+      provider.postGeneralThread({ slug: 'group/project', number: 1 }, 'head-sha', { path: 'b.ts', line: null, severity: 'suggestion', kind: 'cleanup', body: 'dead code' });
+      expect(cmd(mockExec.mock.calls[0])).toContain('projects/group%2Fproject/merge_requests/1/discussions');
       expect(getPayload(mockExec.mock.calls[0])).toEqual({ body: '**[suggestion · cleanup]** `b.ts`: dead code' });
       expect(provider.threadsGeneralFinding({ path: null, line: null, severity: 'warning', kind: 'requirement', body: 'x' }, [])).toBe(true);
     });
@@ -127,7 +141,7 @@ describe('GitLabProvider', () => {
         provider.postReview(
           { slug: 'g/p', number: 1 },
           'sha',
-          { summary: '', verdict: 'COMMENT', inline: [], threaded: [] },
+          { summary: '', verdict: 'COMMENT', inline: [] },
         ),
       ).toThrow('called before fetchPr');
     });
@@ -138,7 +152,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'ok', verdict: 'APPROVE', inline: [{ path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'bug' }], threaded: [] },
+        { summary: 'ok', verdict: 'APPROVE', inline: [{ path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'bug' }] },
       );
 
       expect(mockExec).toHaveBeenCalled();
@@ -153,7 +167,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/subgroup/project', number: 7 },
         'head-sha',
-        { summary: 'ok', verdict: 'COMMENT', inline: [], threaded: [] },
+        { summary: 'ok', verdict: 'COMMENT', inline: [] },
       );
 
       expect(cmd(mockExec.mock.calls[0])).toContain('projects/group%2Fsubgroup%2Fproject/merge_requests/7');
@@ -165,7 +179,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: '', verdict: 'COMMENT', inline: [{ path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'bug' }], threaded: [] },
+        { summary: '', verdict: 'COMMENT', inline: [{ path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'bug' }] },
       );
 
       const payload = getPayload(mockExec.mock.calls[0]);
@@ -186,7 +200,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'lgtm', verdict: 'APPROVE', inline: [], threaded: [] },
+        { summary: 'lgtm', verdict: 'APPROVE', inline: [] },
       );
 
       const endpoints = mockExec.mock.calls.map((c) => cmd(c));
@@ -199,7 +213,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'feedback', verdict: 'COMMENT', inline: [], threaded: [] },
+        { summary: 'feedback', verdict: 'COMMENT', inline: [] },
       );
 
       const endpoints = mockExec.mock.calls.map((c) => cmd(c));
@@ -212,7 +226,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'needs work', verdict: 'REQUEST_CHANGES', inline: [], threaded: [] },
+        { summary: 'needs work', verdict: 'REQUEST_CHANGES', inline: [] },
       );
 
       const endpoints = mockExec.mock.calls.map((c) => cmd(c));
@@ -225,7 +239,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'needs work', verdict: 'REQUEST_CHANGES', inline: [], threaded: [] },
+        { summary: 'needs work', verdict: 'REQUEST_CHANGES', inline: [] },
       );
 
       const noteCall = mockExec.mock.calls.find((c) => cmd(c).includes('/notes'));
@@ -238,7 +252,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'lgtm', verdict: 'APPROVE', inline: [], threaded: [] },
+        { summary: 'lgtm', verdict: 'APPROVE', inline: [] },
       );
 
       const noteCall = mockExec.mock.calls.find((c) => cmd(c).includes('/notes'));
@@ -254,7 +268,7 @@ describe('GitLabProvider', () => {
         { summary: 'lgtm', verdict: 'APPROVE', inline: [
           { path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'b1' },
           { path: 'b.ts', line: 10, severity: 'critical', kind: 'bug', body: 'b2' },
-        ], threaded: [] },
+        ] },
       );
 
       const endpoints = mockExec.mock.calls.map((c) => cmd(c));
@@ -272,7 +286,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'ok', verdict: 'APPROVE', inline: [{ path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'bug' }], threaded: [] },
+        { summary: 'ok', verdict: 'APPROVE', inline: [{ path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'bug' }] },
         true,
       );
 

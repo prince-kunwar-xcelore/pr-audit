@@ -23,7 +23,7 @@ export type MockAnswer = ReviewSessionOutput | VerifySessionOutput | Error;
 
 /**
  * Answers sessions from per-label queues ("review", "verification"); an empty queue
- * falls back to an empty review / a verification that keeps nothing explicitly.
+ * falls back to an empty review / a verification that decides nothing.
  */
 export class MockEngine implements ReviewEngine {
   readonly name = 'Mock';
@@ -34,6 +34,7 @@ export class MockEngine implements ReviewEngine {
   constructor(private answers: Record<string, MockAnswer[]> = {}) {}
 
   run<T>(req: SessionRequest): SessionResult<T> {
+    if (req.label !== 'review' && req.label !== 'verification') throw new Error(`MockEngine: unknown session label "${req.label}"`);
     this.calls.push(req);
     const next = this.answers[req.label]?.shift();
     if (next instanceof Error) throw next;

@@ -59,6 +59,13 @@ describe('findIssueMentions', () => {
     closingIssues: [{ slug, number: 30 }],
   };
 
+  it('uses a branch number only when nothing else points at an issue', () => {
+    expect(findIssueMentions({ ...pr, title: 't', body: '', commits: [], closingIssues: [], headRef: 'release/2024-hotfix' }, slug)).toEqual([
+      { ref: { slug, number: 2024 }, closes: false },
+    ]);
+    expect(findIssueMentions({ ...pr, headRef: 'release/2024-hotfix' }, slug).some((m) => m.ref.number === 2024)).toBe(false);
+  });
+
   it('merges provider links and text mentions, closing if any source says so', () => {
     expect(findIssueMentions(pr, slug)).toEqual([
       { ref: { slug, number: 30 }, closes: true },

@@ -27,6 +27,9 @@ export class MockProvider implements GitProvider {
   readonly reviewCalls: MockReviewCall[] = [];
   readonly skipCalls: { ref: PrRef; headSha: string; title: string; body: string; dryRun: boolean }[] = [];
   readonly followUpCalls: FollowUpPost[][] = [];
+  readonly threadCalls: Finding[] = [];
+  /** Bodies of general findings whose thread post fails. */
+  failThreads = new Set<string>();
 
   constructor(
     private prData: PrData = DEFAULT_PR_DATA,
@@ -48,6 +51,11 @@ export class MockProvider implements GitProvider {
 
   threadsGeneralFinding(finding: Finding, prPaths: string[]): boolean {
     return !!finding.path && prPaths.includes(finding.path);
+  }
+
+  postGeneralThread(_ref: PrRef, _headSha: string, finding: Finding): void {
+    if (this.failThreads.has(finding.body)) throw new Error('HTTP 422');
+    this.threadCalls.push(finding);
   }
 
   postReview(ref: PrRef, headSha: string, review: ReviewPost, dryRun = false): void {

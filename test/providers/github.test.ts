@@ -61,7 +61,7 @@ describe('GitHubProvider.postReview', () => {
       })
       .mockReturnValueOnce('{}');
 
-    new GitHubProvider().postReview(ref, 'sha1', { summary: 'LGTM', verdict: 'APPROVE', inline: [], threaded: [] });
+    new GitHubProvider().postReview(ref, 'sha1', { summary: 'LGTM', verdict: 'APPROVE', inline: [] });
 
     expect(mockExec).toHaveBeenCalledTimes(2);
     const retry = payload(mockExec.mock.calls[1]);
@@ -71,7 +71,7 @@ describe('GitHubProvider.postReview', () => {
 
   it('does not retry other failures', () => {
     mockExec.mockImplementationOnce(() => { throw Object.assign(new Error('boom'), { stdout: '{"message":"Not Found"}' }); });
-    expect(() => new GitHubProvider().postReview(ref, 'sha1', { summary: 's', verdict: 'APPROVE', inline: [], threaded: [] })).toThrow('boom');
+    expect(() => new GitHubProvider().postReview(ref, 'sha1', { summary: 's', verdict: 'APPROVE', inline: [] })).toThrow('boom');
     expect(mockExec).toHaveBeenCalledTimes(1);
   });
 });
@@ -136,22 +136,35 @@ describe('GitHubProvider general findings and follow-ups', () => {
     mockExec.mockReturnValue('{}');
   });
 
-  it('posts inline findings in the review and general findings on PR files as file comments', () => {
+  it('posts inline findings in the review with severity and kind tags', () => {
     new GitHubProvider().postReview(ref, 'sha1', {
       summary: 's',
       verdict: 'REQUEST_CHANGES',
       inline: [{ path: 'a.ts', line: 3, severity: 'critical', kind: 'security', body: 'SQL injection' }],
-      threaded: [{ path: 'b.ts', line: null, severity: 'warning', kind: 'bug', body: 'callers need the new case' }],
     });
     expect(cmd(mockExec.mock.calls[0])).toBe('gh api --method POST /repos/owner/repo/pulls/7/reviews --input -');
     expect(payload(mockExec.mock.calls[0])).toMatchObject({
       event: 'REQUEST_CHANGES',
       comments: [{ path: 'a.ts', line: 3, side: 'RIGHT', body: '**[critical · security]** SQL injection' }],
     });
-    expect(cmd(mockExec.mock.calls[1])).toBe('gh api --method POST /repos/owner/repo/pulls/7/comments --input -');
-    expect(payload(mockExec.mock.calls[1])).toEqual({
+  });
+
+  it('posts a general finding on a PR file as a file-level comment, and throws when that fails', () => {
+    const f = { path: 'b.ts', line: null, severity: 'warning', kind: 'bug', body: 'callers need the new case' } as const;
+    new GitHubProvider().postGeneralThread(ref, 'sha1', f);
+    expect(cmd(mockExec.mock.calls[0])).toBe('gh api --method POST /repos/owner/repo/pulls/7/comments --input -');
+    expect(payload(mockExec.mock.calls[0])).toEqual({
       commit_id: 'sha1', path: 'b.ts', subject_type: 'file', body: '**[warning · bug]** callers need the new case',
     });
+    mockExec.mockImplementationOnce(() => { throw new Error('HTTP 422'); });
+    expect(() => new GitHubProvider().postGeneralThread(ref, 'sha1', f)).toThrow('HTTP 422');
+  });
+
+  it('reports a reply whose thread could not be resolved without failing', () => {
+    mockExec.mockReturnValueOnce('{}').mockImplementationOnce(() => { throw new Error('FORBIDDEN'); });
+    const thread = { id: '11', path: 'a.ts', line: 3, body: 'b', replies: [], resolved: false, outdated: false, resolveId: 'PRRT_x' };
+    expect(() => new GitHubProvider().applyFollowUps(ref, [{ thread, body: 'Fixed.', resolve: true }])).not.toThrow();
+    expect(mockExec).toHaveBeenCalledTimes(2);
   });
 
   it('threads general findings only for files in the PR', () => {

@@ -53,8 +53,15 @@ export function engineEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv
   return { ...env, ...extra };
 }
 
-/** Read-only git subcommands the agent may run. */
-export const READ_ONLY_GIT = ['diff', 'log', 'show', 'blame', 'grep', 'ls-files', 'merge-base', 'rev-parse'];
+/** Read-only git subcommands the agent may run (search is the engine's own tool, not `git grep -O<cmd>`). */
+export const READ_ONLY_GIT = ['diff', 'log', 'show', 'blame', 'ls-files', 'merge-base', 'rev-parse'];
+
+/**
+ * Flags that turn those subcommands into writes, command execution or reads outside the
+ * checkout: `--output=<file>`, `-O`/`--open-files-in-pager`, `--no-index` and `blame --contents`
+ * (any file on disk, e.g. the engine's credentials), external diff drivers.
+ */
+export const GIT_DENIED_FLAGS = ['--output', '-O', '--open-files-in-pager', '--no-index', '--contents', '--ext-diff'];
 
 /**
  * The agent's subscription is out of quota. Retrying won't help until it

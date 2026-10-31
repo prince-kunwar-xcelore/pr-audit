@@ -41,15 +41,16 @@ const key = (r: IssueRef) => `${r.slug.toLowerCase()}#${r.number}`;
 
 /**
  * Every issue the PR points at: provider closing links first, then mentions in the title,
- * description, branch name and commit messages. Deduplicated; `closes` if any source says so.
+ * description and commit messages. Deduplicated; `closes` if any source says so. A number in
+ * the branch name is a weak signal (`release/2024-hotfix`), used only when nothing else is found.
  */
 export function findIssueMentions(pr: PrData, slug: string): IssueMention[] {
-  const all: IssueMention[] = [
+  let all: IssueMention[] = [
     ...pr.closingIssues.map((ref) => ({ ref, closes: true })),
     ...scanText(`${pr.title}\n${pr.body}`, slug),
-    ...scanBranch(pr.headRef, slug),
     ...pr.commits.flatMap((c) => scanText(c, slug)),
   ];
+  if (all.length === 0) all = scanBranch(pr.headRef, slug);
   const byKey = new Map<string, IssueMention>();
   for (const m of all) {
     const k = key(m.ref);

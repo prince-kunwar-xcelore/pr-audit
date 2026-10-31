@@ -180,21 +180,12 @@ export class GitHubProvider implements GitProvider {
         body: `${findingTag(c)} ${c.body}`,
       })),
     };
-    const fileComments = review.threaded.map((c) => ({
-      commit_id: headSha,
-      path: c.path,
-      subject_type: 'file',
-      body: `${findingTag(c)} ${c.body}`,
-    }));
-    const commentsEndpoint = `/repos/${ref.slug}/pulls/${ref.number}/comments`;
-
     log.debug(`GitHub review payload:\n${JSON.stringify(payload, null, 2)}`);
 
     if (dryRun) {
       log.info(`[dry-run] Would POST ${endpoint}`);
       log.info(`[dry-run] Payload:\n${JSON.stringify(payload, null, 2)}`);
-      for (const c of fileComments) log.info(`[dry-run] Would POST ${commentsEndpoint}: ${JSON.stringify(c)}`);
-      log.info(`[dry-run] Review NOT posted (${review.verdict}, ${review.inline.length} inline, ${fileComments.length} file comment(s))`);
+      log.info(`[dry-run] Review NOT posted (${review.verdict}, ${review.inline.length} inline comment(s))`);
       return;
     }
 
@@ -224,15 +215,17 @@ export class GitHubProvider implements GitProvider {
       throw err;
     }
     log.debug(`GitHub response:\n${response}`);
+    log.info(`Review posted: ${review.verdict} (${review.inline.length} inline comment(s))`);
+  }
 
-    for (const c of fileComments) {
-      try {
-        this.post(commentsEndpoint, c, `file comment on ${c.path}`);
-      } catch {
-        log.warn(`[warn] Could not post the file comment on ${c.path}`);
-      }
+  postGeneralThread(ref: PrRef, headSha: string, finding: Finding, dryRun = false): void {
+    const endpoint = `/repos/${ref.slug}/pulls/${ref.number}/comments`;
+    const comment = { commit_id: headSha, path: finding.path, subject_type: 'file', body: `${findingTag(finding)} ${finding.body}` };
+    if (dryRun) {
+      log.info(`[dry-run] Would POST ${endpoint}: ${JSON.stringify(comment)}`);
+      return;
     }
-    log.info(`Review posted: ${review.verdict} (${review.inline.length} inline, ${fileComments.length} file comment(s))`);
+    this.post(endpoint, comment, `file comment on ${finding.path}`);
   }
 
   applyFollowUps(ref: PrRef, posts: FollowUpPost[], dryRun = false): void {
@@ -242,18 +235,27 @@ export class GitHubProvider implements GitProvider {
         log.info(`[dry-run] Would reply on ${thread.path}${thread.line ? `:${thread.line}` : ''}${resolve ? ' and resolve' : ''}: ${body}`);
         continue;
       }
+      const where = `${thread.path}${thread.line ? `:${thread.line}` : ''}`;
       try {
         this.post(endpoint, { body }, 'follow-up reply');
-        if (resolve && thread.resolveId) {
-          execFileSync(
-            'gh',
-            ['api', 'graphql', '-f', `threadId=${thread.resolveId}`, '-f', 'query=mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { isResolved } } }'],
-            { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
-          );
-        }
-        log.info(`Followed up on ${thread.path}${thread.line ? `:${thread.line}` : ''}${resolve ? ' (resolved)' : ''}`);
       } catch (err) {
-        log.warn(`[warn] Follow-up on ${thread.path} failed: ${(err as Error).message.split('\n')[0]}`);
+        log.warn(`[warn] Follow-up reply on ${where} failed: ${(err as Error).message.split('\n')[0]}`);
+        continue;
+      }
+      if (!resolve) {
+        log.info(`Replied on ${where}`);
+        continue;
+      }
+      try {
+        if (!thread.resolveId) throw new Error('no thread id');
+        execFileSync(
+          'gh',
+          ['api', 'graphql', '-f', `threadId=${thread.resolveId}`, '-f', 'query=mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { isResolved } } }'],
+          { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
+        );
+        log.info(`Replied on ${where} and resolved it`);
+      } catch (err) {
+        log.warn(`[warn] Replied on ${where} but could not resolve the thread: ${(err as Error).message.split('\n')[0]}`);
       }
     }
   }

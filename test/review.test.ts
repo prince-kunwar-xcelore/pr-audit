@@ -201,7 +201,7 @@ describe('runReview', () => {
   });
 
   it('threads general findings where the provider can and keeps the rest in the body marker', async () => {
-    const { post } = await run({
+    const { post, provider } = await run({
       review: [{
         summary: 's',
         findings: [
@@ -211,10 +211,33 @@ describe('runReview', () => {
         follow_ups: [],
       }],
     }, EMPTY_HISTORY, { verify: false });
-    expect(post.threaded.map((f) => f.body)).toEqual(['file-level note']);
+    expect(provider.threadCalls.map((f) => f.body)).toEqual(['file-level note']);
     expect(post.summary).toContain('### Other findings\n- **[warning · requirement]** #12 asks for CSV export');
     expect(parseGeneralMarker(post.summary).map((f) => f.body)).toEqual(['#12 asks for CSV export']);
     expect(post.verdict).toBe('REQUEST_CHANGES');
+  });
+
+  it('moves a general finding into the body when its thread fails to post', async () => {
+    const provider = new MockProvider();
+    provider.failThreads.add('file-level note');
+    const engine = new MockEngine({ review: [{ summary: 's', findings: [finding({ line: null, severity: 'suggestion', kind: 'cleanup', body: 'file-level note' })], follow_ups: [] }] });
+    await runReview({
+      provider, engine, ref: { slug: 'test/repo', number: 1 }, pr: provider.fetchPr({ slug: 'test/repo', number: 1 }),
+      history: EMPTY_HISTORY, workspace: workspace(), issues: [], unfetchedIssues: [], options: { ...options, verify: false },
+    });
+    const summary = provider.reviewCalls[0].review.summary;
+    expect(summary).toContain('- **[suggestion · cleanup]** file-level note');
+    expect(parseGeneralMarker(summary).map((f) => f.body)).toEqual(['file-level note']);
+  });
+
+  it('ignores malformed follow-up entries', async () => {
+    const t = { id: '1', path: 'app.ts', line: 2, body: '**[warning]** w', replies: [], resolved: false, outdated: false };
+    const { post } = await run(
+      { review: [{ summary: 's', findings: [], follow_ups: [null as never, { thread: 'T1', action: 'resolve_fixed', body: 'Fixed.' }] }] },
+      { lastSha: 'last000', threads: [t], bodyFindings: [] },
+      { ws: workspace({ last000: NEW_DIFF }), verify: false },
+    );
+    expect(post.verdict).toBe('APPROVE');
   });
 
   it('names the linked issues it checked', async () => {

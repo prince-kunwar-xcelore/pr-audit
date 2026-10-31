@@ -102,13 +102,11 @@ export interface VerifySessionOutput {
   }[];
 }
 
-/** The review as posted: inline findings become line threads, general ones file threads or body items. */
+/** The review as posted: a summary (with any body findings), the verdict, and inline findings on their lines. */
 export interface ReviewPost {
   summary: string;
   verdict: Verdict;
   inline: Finding[];
-  /** General findings the provider posts as their own threads. */
-  threaded: Finding[];
 }
 
 export interface SessionUsage {
