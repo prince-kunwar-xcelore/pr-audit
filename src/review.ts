@@ -242,7 +242,14 @@ export async function runReview(input: ReviewInput): Promise<ReviewOutcome> {
   let findings = sanitizeFindings(review.output.findings);
   const threadById = new Map(open.map((o) => [o.id, o.thread]));
   let followUps: FollowUp[] = (Array.isArray(review.output.follow_ups) ? review.output.follow_ups : []).filter(
-    (f) => !!f && typeof f === 'object' && threadById.has(f.thread) && ['resolve_fixed', 'resolve_answered', 'reply'].includes(f.action) && f.body?.trim(),
+    (f) =>
+      !!f &&
+      typeof f === 'object' &&
+      threadById.has(f.thread) &&
+      ['resolve_fixed', 'resolve_answered', 'reply'].includes(f.action) &&
+      f.body?.trim() &&
+      // pr-audit already had the last word there: no second reply until the author answers
+      !(f.action === 'reply' && threadById.get(f.thread)!.awaitingAuthor),
   );
   log.info(`  Candidate findings: ${findings.length} · follow-ups: ${followUps.length}`);
   for (const f of findings) log.debug(`  ${findingTag(f)} ${f.path ?? '(general)'}${f.line ? `:${f.line}` : ''} — ${f.body}`);

@@ -311,6 +311,24 @@ describe('runReview incremental', () => {
     expect(post.summary).toContain('Resolved 1 earlier thread(s).');
   });
 
+  it('does not reply twice where pr-audit already had the last word, but can still resolve', async () => {
+    const waiting = thread({ awaitingAuthor: true });
+    const replied = await run(
+      { review: [{ summary: 's', findings: [], follow_ups: [{ thread: 'T1', action: 'reply', body: 'Still a problem.' }] }] },
+      history([waiting]),
+      { ws: workspace({ last000: NEW_DIFF }), verify: false },
+    );
+    expect(replied.provider.followUpCalls).toEqual([]);
+    expect(replied.engine.calls[0].prompt).toContain('(you already replied; waiting for the author');
+
+    const fixed = await run(
+      { review: [{ summary: 's', findings: [], follow_ups: [{ thread: 'T1', action: 'resolve_fixed', body: 'Fixed.' }] }] },
+      history([waiting]),
+      { ws: workspace({ last000: NEW_DIFF }), verify: false },
+    );
+    expect(fixed.provider.followUpCalls[0].map((p) => p.resolve)).toEqual([true]);
+  });
+
   it('approves once every open thread is resolved', async () => {
     const { post } = await run(
       { review: [{ summary: 's', findings: [], follow_ups: [{ thread: 'T1', action: 'resolve_fixed', body: 'Fixed.' }] }] },

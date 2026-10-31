@@ -208,7 +208,7 @@ describe('GitHubProvider general findings and follow-ups', () => {
       { thread: { ...thread, resolveId: 'PRRT_y' }, body: 'Still an issue: input is unescaped.', resolve: false },
     ]);
     expect(cmd(mockExec.mock.calls[0])).toBe('gh api --method POST /repos/owner/repo/pulls/7/comments/11/replies --input -');
-    expect(payload(mockExec.mock.calls[0])).toEqual({ body: 'Fixed in abc1234.' });
+    expect(payload(mockExec.mock.calls[0])).toEqual({ body: 'Fixed in abc1234.\n\n<!-- pr-audit:resolved -->' });
     const resolve = mockExec.mock.calls[1][1] as string[];
     expect(resolve.slice(0, 4)).toEqual(['api', 'graphql', '-f', 'threadId=PRRT_x']);
     expect(resolve[5]).toMatch(/resolveReviewThread/);
@@ -264,6 +264,27 @@ describe('GitHubProvider review history', () => {
     ]);
     const graphql = mockExec.mock.calls[3][1] as string[];
     expect(graphql.slice(0, 9)).toEqual(['api', 'graphql', '--paginate', '-F', 'owner=owner', '-F', 'name=repo', '-F', 'number=7']);
+  });
+
+  it('treats a thread as resolved when the last word is pr-audit\'s marked reply, and waiting when it is a plain one', () => {
+    mockExec
+      .mockReturnValueOnce('me\n')
+      .mockReturnValueOnce('')
+      .mockReturnValueOnce(ndjson([
+        { id: 1, path: 'a.ts', line: 3, original_line: 3, body: '**[warning]** fixed one', user: bot, author_association: 'NONE' },
+        { id: 2, in_reply_to_id: 1, path: 'a.ts', line: 3, original_line: 3, body: 'Fixed in abc.\n\n<!-- pr-audit:resolved -->', user: bot, author_association: 'NONE' },
+        { id: 3, path: 'a.ts', line: 5, original_line: 5, body: '**[warning]** disputed', user: bot, author_association: 'NONE' },
+        { id: 4, in_reply_to_id: 3, path: 'a.ts', line: 5, original_line: 5, body: 'by design', user: dev, author_association: 'OWNER' },
+        { id: 5, in_reply_to_id: 3, path: 'a.ts', line: 5, original_line: 5, body: 'Still a problem: x', user: bot, author_association: 'NONE' },
+        { id: 6, path: 'a.ts', line: 7, original_line: 7, body: '**[warning]** answered again', user: bot, author_association: 'NONE' },
+        { id: 7, in_reply_to_id: 6, path: 'a.ts', line: 7, original_line: 7, body: 'Still a problem: y', user: bot, author_association: 'NONE' },
+        { id: 8, in_reply_to_id: 6, path: 'a.ts', line: 7, original_line: 7, body: 'ok, but see z', user: dev, author_association: 'OWNER' },
+      ]))
+      .mockReturnValueOnce('');
+    const [fixed, disputed, answered] = new GitHubProvider().fetchReviewHistory(ref).threads;
+    expect([fixed.resolved, fixed.awaitingAuthor]).toEqual([true, undefined]);
+    expect([disputed.resolved, disputed.awaitingAuthor]).toEqual([false, true]);
+    expect([answered.resolved, answered.awaitingAuthor]).toEqual([false, undefined]);
   });
 
   it('ignores forged markers, spoofed thread roots and replies from outsiders', () => {

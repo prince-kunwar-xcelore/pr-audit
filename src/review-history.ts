@@ -21,6 +21,8 @@ export interface PriorThread {
   outdated: boolean;
   /** Provider handle needed to resolve the thread (GitHub: GraphQL thread node id). */
   resolveId?: string;
+  /** pr-audit has the last word (its reply, no author answer since): don't reply again. */
+  awaitingAuthor?: boolean;
 }
 
 export interface ReviewHistory {
@@ -76,6 +78,9 @@ export function parseGeneralMarker(body: string | null | undefined): Finding[] {
   }
 }
 
+/** Hidden marker on pr-audit's resolving replies: the thread counts as resolved even if the provider refused to resolve it. */
+export const RESOLVED_MARKER = '<!-- pr-audit:resolved -->';
+
 /** The tag every pr-audit finding comment starts with, e.g. "**[warning · question]**". */
 export function findingTag(f: Pick<Finding, 'severity' | 'kind'>): string {
   return `**[${f.severity} · ${f.kind}]**`;
@@ -125,9 +130,10 @@ export function renderOpenThreads(threads: { id: string; thread: PriorThread }[]
     .map(({ id, thread: t }) => {
       const replies = t.replies
         .slice(-MAX_REPLIES)
-        .map((r) => `\n    ↳ ${r.author}: ${clip(r.body, MAX_REPLY)}`)
+        .map((r) => `\n    ↳ ${r.author}: ${clip(r.body.replace(/<!--[\s\S]*?-->/g, ''), MAX_REPLY)}`)
         .join('');
-      return `- ${id} ${where(t)}${t.line === null ? ' (file)' : ''}: ${clip(t.body, MAX_BODY)}${replies}`;
+      const waiting = t.awaitingAuthor ? ' (you already replied; waiting for the author — only resolve it if the code now fixes it)' : '';
+      return `- ${id} ${where(t)}${t.line === null ? ' (file)' : ''}${waiting}: ${clip(t.body, MAX_BODY)}${replies}`;
     })
     .join('\n');
 }

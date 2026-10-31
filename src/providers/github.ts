@@ -6,6 +6,7 @@ import {
   findingTag,
   isPrAuditComment,
   parseGeneralMarker,
+  RESOLVED_MARKER,
   parseReviewMarker,
   type PriorThread,
   type ReviewHistory,
@@ -253,8 +254,11 @@ export class GitHubProvider implements GitProvider {
   }
 
   applyFollowUps(ref: PrRef, posts: FollowUpPost[], dryRun = false): void {
-    for (const { thread, body, resolve } of posts) {
+    for (const post of posts) {
+      const { thread, resolve } = post;
+      let { body } = post;
       const endpoint = `/repos/${ref.slug}/pulls/${ref.number}/comments/${thread.id}/replies`;
+      if (resolve) body = `${body}\n\n${RESOLVED_MARKER}`;
       if (dryRun) {
         log.info(`[dry-run] Would reply on ${thread.path}${thread.line ? `:${thread.line}` : ''}${resolve ? ' and resolve' : ''}: ${body}`);
         continue;
@@ -323,11 +327,19 @@ export class GitHubProvider implements GitProvider {
         });
       }
     }
+    const lastByPoster = new Map<PriorThread, boolean>();
     for (const c of comments) {
       const thread = c.in_reply_to_id ? threads.get(c.in_reply_to_id) : undefined;
       if (thread && (TRUSTED_ASSOCIATIONS.has(c.author_association) || byPoster(c.user))) {
         thread.replies.push({ author: c.user?.login ?? 'unknown', body: c.body });
+        lastByPoster.set(thread, byPoster(c.user));
       }
+    }
+    for (const [thread, ours] of lastByPoster) {
+      if (!ours) continue;
+      // Resolved by an earlier follow-up the provider wouldn't apply; or waiting on the author
+      if (thread.replies.at(-1)!.body.includes(RESOLVED_MARKER)) thread.resolved = true;
+      else thread.awaitingAuthor = true;
     }
 
     log.debug(`Review history: last reviewed ${lastSha ?? '(none)'}, ${threads.size} earlier pr-audit thread(s), ${bodyFindings.length} body finding(s)`);
