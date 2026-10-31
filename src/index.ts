@@ -1,33 +1,28 @@
 #!/usr/bin/env node
 import process from 'node:process';
 import { resolveProvider, type GitProvider } from './provider.js';
-import type { ParsedFile, PrRef, ReviewOutput, TokenUsage } from './types.js';
+import type { LinkedIssue, PrRef } from './types.js';
 import fs from 'node:fs';
-import { resolveEngine, AgentAuthError, UsageLimitError, DEFAULT_EFFORT, ENGINE_EFFORTS } from './engine.js';
-import { parseDiffString, chunkFiles, validateComments } from './diff.js';
-import { buildPrompt, buildSynthesisPrompt, mergeResults } from './claude.js';
+import {
+  resolveEngine,
+  AgentAuthError,
+  SessionTimeoutError,
+  UsageLimitError,
+  DEFAULT_EFFORT,
+  ENGINE_EFFORTS,
+} from './engine.js';
 import { initLogger, log } from './logger.js';
-import { countOpenFindings, holdForOpenFindings, reviewMarker, type ReviewHistory } from './review-history.js';
+import { EMPTY_HISTORY, type ReviewHistory } from './review-history.js';
 import { readAuthToken, redactArgs, AUTH_TOKEN_ENV } from './auth-token.js';
+import { findIssueMentions, issueLabel, MAX_ISSUES, trimIssue } from './requirements.js';
+import { gitDiff, hasCommit, isAncestor, mergeBase, prepareCheckout, type Checkout } from './checkout.js';
+import { runReview, type ReviewOutcome, type SessionReport, type Workspace } from './review.js';
+import { CodexSandboxError } from './engines/codex-cli.js';
 
-async function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function withRetry<T>(fn: () => T, retries = 3, label = ''): Promise<T> {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return fn();
-    } catch (err) {
-      // Quota exhaustion and bad credentials won't clear in seconds — don't burn retries on them
-      if (attempt === retries || err instanceof UsageLimitError || err instanceof AgentAuthError) throw err;
-      const delay = 2 ** attempt * 1000;
-      log.warn(`${label} attempt ${attempt}/${retries} failed — retrying in ${delay / 1000}s...`);
-      await sleep(delay);
-    }
-  }
-  throw new Error('unreachable');
-}
+/** Default session time limits, in minutes. */
+export const DEFAULT_REVIEW_TIMEOUT_MIN = 20;
+export const DEFAULT_VERIFY_TIMEOUT_MIN = 10;
+const MAX_TIMEOUT_MIN = 240;
 
 /** Exit code when the review is skipped because the agent's usage limit was hit. */
 export const EXIT_USAGE_LIMIT = 3;
@@ -99,6 +94,81 @@ function flagIndices(args: string[], ...flags: string[]): Set<number> {
   return idxs;
 }
 
+const USAGE =
+  'Usage: pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider github|gitlab] [--full] [--no-verify] [--timeout <minutes>] [--dry-run]';
+
+function usageText(): string {
+  return (
+    `${USAGE}\n` +
+    '\n' +
+    'Supported formats:\n' +
+    '  GitHub:  owner/repo#123  or  https://github.com/owner/repo/pull/123\n' +
+    '  GitLab:  group/project!123  or  https://gitlab.com/group/project/-/merge_requests/123\n' +
+    '\n' +
+    'Engines: claude-cli (default), codex-cli\n' +
+    `Credentials: --auth-token, --auth-token-file or $${AUTH_TOKEN_ENV} (default: the agent CLI's own login)\n` +
+    `Effort (default ${DEFAULT_EFFORT}): claude-cli ${ENGINE_EFFORTS['claude-cli'].join('|')}; codex-cli ${ENGINE_EFFORTS['codex-cli'].join('|')}\n` +
+    `Verification: on by default; --no-verify skips it. --timeout: review session limit in minutes (default ${DEFAULT_REVIEW_TIMEOUT_MIN}; verification gets half)`
+  );
+}
+
+const BOOLEAN_FLAGS = ['--dry-run', '--full', '--verify', '--no-verify'];
+
+/** Linked issues to hand the agent: fetched up to MAX_ISSUES, the rest named only. */
+function collectIssues(provider: GitProvider, ref: PrRef, pr: ReturnType<GitProvider['fetchPr']>): { issues: LinkedIssue[]; unfetched: string[] } {
+  const mentions = findIssueMentions(pr, ref.slug);
+  const issues: LinkedIssue[] = [];
+  const unfetched: string[] = [];
+  for (const m of mentions) {
+    if (issues.length >= MAX_ISSUES) {
+      unfetched.push(issueLabel(m.ref, ref.slug));
+      continue;
+    }
+    const issue = provider.fetchIssue(m.ref);
+    if (issue) issues.push(trimIssue({ ...issue, closes: m.closes }));
+  }
+  return { issues, unfetched };
+}
+
+function workspaceOf(checkout: Checkout): Workspace {
+  return {
+    dir: checkout.dir,
+    diff: (from, to, twoDot) => gitDiff(checkout.dir, from, to, twoDot),
+    mergeBase: (a, b) => mergeBase(checkout.dir, a, b),
+    isAncestor: (a, b) => isAncestor(checkout.dir, a, b),
+    hasCommit: (sha) => hasCommit(checkout.dir, sha),
+  };
+}
+
+function reportUsage(sessions: SessionReport[]): void {
+  if (sessions.length === 0) return;
+  const total = sessions.reduce(
+    (t, { usage: u }) => ({
+      inputTokens: t.inputTokens + u.inputTokens,
+      outputTokens: t.outputTokens + u.outputTokens,
+      cacheReadTokens: t.cacheReadTokens + u.cacheReadTokens,
+      durationMs: t.durationMs + u.durationMs,
+      costUSD: u.costUSD === null ? t.costUSD : (t.costUSD ?? 0) + u.costUSD,
+    }),
+    { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, durationMs: 0, costUSD: null as number | null },
+  );
+  const cost = (c: number | null) => (c === null ? '—' : `$${c.toFixed(4)}`);
+  log.info(
+    `Usage:     ${total.inputTokens} in / ${total.outputTokens} out / ${total.cacheReadTokens} cache-read · ` +
+      `${(total.durationMs / 1000).toFixed(0)}s${total.costUSD !== null ? ` · ${cost(total.costUSD)} API-equivalent` : ''}`,
+  );
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    const rows = [...sessions, { label: '**total**', usage: { ...total, cacheCreationTokens: 0 } }].map(
+      ({ label, usage: u }) =>
+        `| ${label} | ${u.inputTokens} | ${u.outputTokens} | ${u.cacheReadTokens} | ${(u.durationMs / 1000).toFixed(0)}s | ${cost(u.costUSD)} |`,
+    );
+    fs.appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      `### AI review usage\n\n| Session | Input | Output | Cache read | Time | API-equivalent cost |\n|---|---|---|---|---|---|\n${rows.join('\n')}\n`,
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
@@ -106,30 +176,28 @@ async function main(): Promise<void> {
   const model = parseFlag(args, '--model');
   const providerHint = parseFlag(args, '--provider');
   const effort = parseFlag(args, '--effort');
+  const timeoutArg = parseFlag(args, '--timeout');
   const dryRun = args.includes('--dry-run');
   const fullReview = args.includes('--full');
+  const verify = !args.includes('--no-verify');
 
   if (model && !engineName) {
     console.error('Error: --model requires --engine. Supported engines: claude-cli, codex-cli');
     process.exit(1);
   }
+  const reviewTimeoutMin = timeoutArg ? Number(timeoutArg) : DEFAULT_REVIEW_TIMEOUT_MIN;
+  if (!Number.isFinite(reviewTimeoutMin) || reviewTimeoutMin <= 0 || reviewTimeoutMin > MAX_TIMEOUT_MIN) {
+    console.error(`Error: --timeout must be a number of minutes between 0 and ${MAX_TIMEOUT_MIN}`);
+    process.exit(1);
+  }
+  const verifyTimeoutMin = timeoutArg ? reviewTimeoutMin / 2 : DEFAULT_VERIFY_TIMEOUT_MIN;
 
-  const skipIdxs = flagIndices(args, '--engine', '--model', '--auth-token', '--auth-token-file', '--provider', '--effort');
-  const positional = args.filter((a, i) => !skipIdxs.has(i) && a !== '--dry-run' && a !== '--full');
+  const skipIdxs = flagIndices(args, '--engine', '--model', '--auth-token', '--auth-token-file', '--provider', '--effort', '--timeout');
+  const positional = args.filter((a, i) => !skipIdxs.has(i) && !BOOLEAN_FLAGS.includes(a));
   const arg = positional[0];
 
   if (!arg) {
-    console.error(
-      'Usage: pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider github|gitlab] [--full] [--dry-run]\n' +
-      '\n' +
-      'Supported formats:\n' +
-      '  GitHub:  owner/repo#123  or  https://github.com/owner/repo/pull/123\n' +
-      '  GitLab:  group/project!123  or  https://gitlab.com/group/project/-/merge_requests/123\n' +
-      '\n' +
-      'Engines: claude-cli (default), codex-cli\n' +
-      `Credentials: --auth-token, --auth-token-file or $${AUTH_TOKEN_ENV} (default: the agent CLI's own login)\n` +
-      `Effort (default ${DEFAULT_EFFORT}): claude-cli ${ENGINE_EFFORTS['claude-cli'].join('|')}; codex-cli ${ENGINE_EFFORTS['codex-cli'].join('|')}`,
-    );
+    console.error(usageText());
     process.exit(1);
   }
 
@@ -147,159 +215,105 @@ async function main(): Promise<void> {
   log.info(`Engine:   ${engine.name}`);
   log.info(`Model:    ${effectiveModel}`);
   log.info(`Effort:   ${engine.effort}`);
+  log.info(`Verify:   ${verify ? 'on' : 'off'}`);
   if (dryRun) log.info('Mode:     DRY-RUN (no review will be posted)');
   log.info(`Fetching ${provider.reviewTerm} ${ref.slug}#${ref.number}...`);
   console.log(`Logging to ${log.filePath}`);
 
-  const prData = provider.fetchPr(ref);
-  log.info(`  Title: ${prData.title}`);
-  log.debug(`  Body: ${prData.body.slice(0, 300)}${prData.body.length > 300 ? '…' : ''}`);
-  log.debug(`  headSha: ${prData.headSha}`);
+  const pr = provider.fetchPr(ref);
+  log.info(`  Title: ${pr.title}`);
+  log.debug(`  head ${pr.headSha} (${pr.headRef}) → base ${pr.baseSha} (${pr.baseRef})`);
 
-  const prFiles = parseDiffString(prData.diff);
-  if (prFiles.length === 0) {
-    log.info('No reviewable files found in diff. Exiting.');
-    await log.close();
-    process.exit(0);
-  }
-
-  // Incremental review: only what changed since the last pr-audit review, unless --full
-  let history: ReviewHistory = { lastSha: null, threads: [] };
+  let history: ReviewHistory = EMPTY_HISTORY;
   try {
     if (provider.fetchReviewHistory) history = provider.fetchReviewHistory(ref);
   } catch (err) {
     log.warn(`[warn] Could not read earlier reviews — reviewing the full diff (${(err as Error).message})`);
   }
-  let files: ParsedFile[] = prFiles;
-  let sinceSha: string | undefined;
-  if (!fullReview && history.lastSha === prData.headSha) {
-    log.info(`Commit ${prData.headSha.slice(0, 7)} was already reviewed (use --full to review it again). Exiting.`);
+  if (!fullReview && history.lastSha === pr.headSha) {
+    log.info(`Commit ${pr.headSha.slice(0, 7)} was already reviewed (use --full to review it again). Exiting.`);
     await log.close();
     process.exit(0);
   }
-  if (!fullReview && history.lastSha && provider.fetchDiffSince) {
-    const since = provider.fetchDiffSince(ref, history.lastSha, prData.headSha);
-    if (since === null) {
-      log.info(`  Last reviewed commit ${history.lastSha.slice(0, 7)} is not in this branch's history (force-push?) — reviewing the full diff`);
-    } else {
-      // Files outside the PR's own diff (e.g. from merging the base branch in) aren't the PR's changes
-      const prPaths = new Set(prFiles.map((f) => f.path));
-      files = parseDiffString(since).filter((f) => prPaths.has(f.path));
-      sinceSha = history.lastSha;
-      log.info(`  Incremental: changes since last reviewed commit ${sinceSha.slice(0, 7)}`);
-      if (files.length === 0) {
-        log.info('No reviewable changes since the last review. Exiting.');
-        await log.close();
-        process.exit(0);
-      }
-    }
-  }
   if (history.threads.length) log.info(`  Earlier pr-audit threads: ${history.threads.length}`);
-  log.info(`  Files to review: ${files.length}`);
-  log.debug(`  Files: ${files.map((f) => f.path).join(', ')}`);
 
-  const batches = chunkFiles(files);
-  log.info(`  Batches: ${batches.length}`);
+  const { issues, unfetched } = collectIssues(provider, ref, pr);
+  if (issues.length) log.info(`  Linked issues: ${issues.map((i) => `${issueLabel(i.ref, ref.slug)}${i.closes ? ' (closes)' : ''}`).join(', ')}`);
 
-  const totalRenderedLines = files.reduce((s, f) => s + f.renderedLineCount, 0);
-  const estInputTokens = totalRenderedLines * 12 + batches.length * 800;
-  const estOutputTokens = batches.length * 800;
-  const estCost = (estInputTokens * 3 + estOutputTokens * 15) / 1_000_000;
-  log.info(`  Est. cost: ~$${estCost.toFixed(3)} (${totalRenderedLines} rendered lines)`);
+  log.info('Preparing checkout...');
+  const checkout = prepareCheckout({
+    slug: ref.slug,
+    headSha: pr.headSha,
+    baseSha: pr.baseSha,
+    extraShas: history.lastSha ? [history.lastSha] : [],
+    clone: (dir) => provider.cloneRepo(ref, dir),
+  });
+  log.info(`  Checkout: ${checkout.dir} (${checkout.source})`);
 
-  const results = [];
-  let merged: ReviewOutput;
-  let totalUsage: TokenUsage;
+  let outcome: ReviewOutcome;
   try {
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-      const totalChanged = batch.reduce((s, f) => s + f.changedLineCount, 0);
-
-      log.section(`Batch ${i + 1} / ${batches.length}`);
-      log.info(`Reviewing batch ${i + 1}/${batches.length} (${totalChanged} changed lines)...`);
-      log.debug(`  Files in batch: ${batch.map((f) => `${f.path} (${f.changedLineCount} lines)`).join(', ')}`);
-
-      const prompt = buildPrompt(prData, batch, provider.reviewTerm, { sinceSha, priorThreads: history.threads });
-      const result = await withRetry(
-        () => engine.review(prompt, effectiveModel),
-        3,
-        `Batch ${i + 1}/${batches.length}`,
-      );
-      results.push(result);
-
-      const u = result.usage;
-      const tokenLine =
-        `  Tokens: ${u.inputTokens} in / ${u.outputTokens} out` +
-        (u.cacheReadTokens ? ` / ${u.cacheReadTokens} cache-read` : '') +
-        `  Cost: $${u.costUSD.toFixed(4)}`;
-      log.info(tokenLine);
-
-      if (i < batches.length - 1) {
-        await sleep(500);
-      }
-    }
-
-    ({ review: merged, totalUsage } = mergeResults(results));
-
-    if (batches.length > 1) {
-      log.section('SYNTHESIZING SUMMARY');
-      log.info('Synthesizing batch summaries into one...');
-      const synthesisPrompt = buildSynthesisPrompt(
-        prData.title,
-        results.map((r) => r.review.summary),
-        merged.verdict,
-        provider.reviewTerm,
-      );
-      merged.summary = engine.synthesize(synthesisPrompt, effectiveModel);
-    }
+    outcome = await runReview({
+      provider,
+      engine,
+      ref,
+      pr,
+      history,
+      workspace: workspaceOf(checkout),
+      issues,
+      unfetchedIssues: unfetched,
+      options: {
+        model: effectiveModel,
+        verify,
+        full: fullReview,
+        dryRun,
+        reviewTimeoutMs: reviewTimeoutMin * 60_000,
+        verifyTimeoutMs: verifyTimeoutMin * 60_000,
+      },
+    });
   } catch (err) {
     if (!(err instanceof UsageLimitError)) throw err;
-    const code = handleUsageLimit(err, provider, ref, prData.headSha, provider.reviewTerm, dryRun);
+    const code = handleUsageLimit(err, provider, ref, pr.headSha, provider.reviewTerm, dryRun);
     await log.close();
     process.exit(code);
+  } finally {
+    checkout.cleanup();
   }
 
-  if (batches.length > 1) {
-    const totalLine =
-      `Total — Tokens: ${totalUsage.inputTokens} in / ${totalUsage.outputTokens} out` +
-      (totalUsage.cacheReadTokens ? ` / ${totalUsage.cacheReadTokens} cache-read` : '') +
-      `  Cost: $${totalUsage.costUSD.toFixed(4)}`;
-    log.info(totalLine);
+  if (!outcome.posted) {
+    log.info(`${outcome.reason} Exiting.`);
+    await log.close();
+    return;
   }
-
-  // Lines must be in the reviewed diff and in the PR's own diff (the platform rejects anything else)
-  const validComments = validateComments(validateComments(merged.comments, files), prFiles);
-  if (validComments.length < merged.comments.length) {
-    log.warn(`[warn] Dropped ${merged.comments.length - validComments.length} comment(s) with invalid line refs`);
-  }
-
-  const hold = holdForOpenFindings(merged.verdict, countOpenFindings(history.threads, prFiles.map((f) => f.path)));
-  if (hold.verdict !== merged.verdict) {
-    log.info(`  Verdict ${merged.verdict} → ${hold.verdict}: earlier findings are still open`);
-    merged.verdict = hold.verdict;
-  }
-  if (hold.note) merged.summary = `${merged.summary}\n\n${hold.note}`;
-
-  if (sinceSha) {
-    merged.summary = `_Incremental review: changes since ${sinceSha.slice(0, 7)}._\n\n${merged.summary}`;
-  }
-  // Recorded so the next run can review only what's pushed after this commit
-  merged.summary = `${merged.summary}\n\n${reviewMarker(prData.headSha)}`;
-
-  log.section(dryRun ? 'DRY-RUN: REVIEW PREVIEW' : 'POSTING REVIEW');
-  log.info(`${dryRun ? 'Previewing' : 'Posting'} review (${merged.verdict})...`);
-  provider.postReview(ref, prData.headSha, merged, validComments, dryRun);
 
   log.section('RUN SUMMARY');
-  log.info(`Verdict:   ${merged.verdict}`);
-  log.info(`Comments:  ${validComments.length} posted, ${merged.comments.length - validComments.length} dropped`);
-  log.info(`Total cost: $${totalUsage.costUSD.toFixed(4)}`);
+  log.info(`Verdict:   ${outcome.verdict}`);
+  log.info(`Findings:  ${outcome.inline} inline, ${outcome.threaded} general thread(s), ${outcome.body} in the body`);
+  if (outcome.followUps) log.info(`Follow-ups: ${outcome.followUps}`);
+  reportUsage(outcome.sessions);
   log.info(`Log file:  ${log.filePath}`);
 
   await log.close();
 }
 
 main().catch(async (err) => {
+  if (err instanceof CodexSandboxError) {
+    log.section('FAILED: CODEX SANDBOX');
+    if (!log.filePath) console.error(`Error: ${err.message}`);
+    log.error(err.message);
+    if (process.env.GITHUB_ACTIONS === 'true') console.log(`::error title=Codex sandbox unavailable::${escapeData(err.message)}`);
+    await log.close();
+    process.exit(1);
+  }
+  if (err instanceof SessionTimeoutError) {
+    log.section('FAILED: SESSION TIMEOUT');
+    if (!log.filePath) console.error(`Error: ${err.message}`);
+    log.error(`${err.message} — raise it with --timeout <minutes>`);
+    if (process.env.GITHUB_ACTIONS === 'true') {
+      console.log(`::error title=AI review timed out::${escapeData(`${err.message}; raise it with --timeout <minutes>`)}`);
+    }
+    await log.close();
+    process.exit(1);
+  }
   if (err instanceof AgentAuthError) {
     // One clear line instead of a stack trace; a real failure, so exit non-zero
     log.section('FAILED: AGENT AUTHENTICATION');

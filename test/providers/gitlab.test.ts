@@ -18,6 +18,9 @@ function cmd(call: unknown[]): string {
 const MR_META = {
   title: 'Test MR',
   description: 'A test MR',
+  web_url: 'https://gitlab.com/group/project/-/merge_requests/1',
+  source_branch: 'feature',
+  target_branch: 'main',
   diff_refs: {
     base_sha: 'base-sha',
     start_sha: 'start-sha',
@@ -29,7 +32,8 @@ function setupProvider(slug = 'group/project', number = 1): GitLabProvider {
   const provider = new GitLabProvider();
   mockExec
     .mockReturnValueOnce(JSON.stringify(MR_META))
-    .mockReturnValueOnce('diff content');
+    .mockReturnValueOnce('[]')
+    .mockReturnValueOnce('[]');
   provider.fetchPr({ slug, number });
   mockExec.mockClear();
   mockExec.mockReturnValue('{}');
@@ -47,23 +51,29 @@ describe('GitLabProvider', () => {
   });
 
   describe('fetchPr', () => {
-    it('calls glab mr view and glab mr diff with the correct flags', () => {
+    it('reads the MR, its commits and the issues it closes through the API', () => {
       const provider = new GitLabProvider();
       mockExec
         .mockReturnValueOnce(JSON.stringify(MR_META))
-        .mockReturnValueOnce('diff content');
+        .mockReturnValueOnce(JSON.stringify([{ message: 'second' }, { message: 'first' }]))
+        .mockReturnValueOnce(JSON.stringify([{ iid: 12, references: { full: 'group/project#12' } }]));
 
       const result = provider.fetchPr({ slug: 'group/project', number: 1 });
 
-      expect(cmd(mockExec.mock.calls[0])).toBe('glab mr view 1 -R group/project --output json');
-      expect(cmd(mockExec.mock.calls[1])).toBe('glab mr diff 1 -R group/project');
-      expect(result.title).toBe('Test MR');
-      expect(result.body).toBe('A test MR');
-      expect(result.headSha).toBe('head-sha');
-      expect(result.diff).toBe('diff content');
-      expect(result.providerMeta).toEqual({
-        baseSha: 'base-sha',
-        startSha: 'start-sha',
+      expect(cmd(mockExec.mock.calls[0])).toBe('glab api projects/group%2Fproject/merge_requests/1');
+      expect(cmd(mockExec.mock.calls[1])).toBe('glab api projects/group%2Fproject/merge_requests/1/commits?per_page=100');
+      expect(cmd(mockExec.mock.calls[2])).toBe('glab api projects/group%2Fproject/merge_requests/1/closes_issues');
+      expect(result).toEqual({
+        title: 'Test MR',
+        body: 'A test MR',
+        url: 'https://gitlab.com/group/project/-/merge_requests/1',
+        headSha: 'head-sha',
+        baseSha: 'start-sha',
+        baseRef: 'main',
+        headRef: 'feature',
+        commits: ['first', 'second'],
+        closingIssues: [{ slug: 'group/project', number: 12 }],
+        providerMeta: { baseSha: 'base-sha', startSha: 'start-sha' },
       });
     });
 
@@ -71,7 +81,8 @@ describe('GitLabProvider', () => {
       const provider = new GitLabProvider();
       mockExec
         .mockReturnValueOnce(JSON.stringify({ ...MR_META, description: null }))
-        .mockReturnValueOnce('');
+        .mockReturnValueOnce('[]')
+        .mockReturnValueOnce('[]');
       expect(provider.fetchPr({ slug: 'g/p', number: 1 }).body).toBe('');
     });
 
@@ -82,6 +93,47 @@ describe('GitLabProvider', () => {
     });
   });
 
+  describe('fetchIssue', () => {
+    it('returns the issue with its non-system notes', () => {
+      mockExec
+        .mockReturnValueOnce(JSON.stringify({ title: 'CSV', description: 'Add CSV', web_url: 'u', state: 'opened' }))
+        .mockReturnValueOnce(JSON.stringify([
+          { system: true, body: 'changed the description', author: { username: 'pm' } },
+          { system: false, body: 'Include headers', author: { username: 'pm' } },
+        ]));
+      expect(new GitLabProvider().fetchIssue({ slug: 'g/p', number: 12 })).toEqual({
+        ref: { slug: 'g/p', number: 12 }, url: 'u', title: 'CSV', body: 'Add CSV', state: 'opened',
+        comments: [{ author: 'pm', body: 'Include headers' }],
+      });
+    });
+  });
+
+  describe('inline failures', () => {
+    it('keeps posting and lists findings GitLab rejected in the summary note', () => {
+      const provider = setupProvider();
+      mockExec.mockImplementationOnce(() => { throw new Error('400 position invalid'); }).mockReturnValue('{}');
+      provider.postReview({ slug: 'group/project', number: 1 }, 'head-sha', {
+        summary: 's', verdict: 'COMMENT',
+        inline: [
+          { path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'rejected one' },
+          { path: 'a.ts', line: 6, severity: 'warning', kind: 'bug', body: 'posted one' },
+        ],
+      });
+      expect(mockExec).toHaveBeenCalledTimes(3);
+      expect(getPayload(mockExec.mock.calls[2]).body).toContain('### Findings that could not be posted inline\n- **[warning · bug]** `a.ts:5`: rejected one');
+    });
+  });
+
+  describe('general findings', () => {
+    it('posts them as MR discussions without a position', () => {
+      const provider = setupProvider();
+      provider.postGeneralThread({ slug: 'group/project', number: 1 }, 'head-sha', { path: 'b.ts', line: null, severity: 'suggestion', kind: 'cleanup', body: 'dead code' });
+      expect(cmd(mockExec.mock.calls[0])).toContain('projects/group%2Fproject/merge_requests/1/discussions');
+      expect(getPayload(mockExec.mock.calls[0])).toEqual({ body: '**[suggestion · cleanup]** `b.ts`: dead code' });
+      expect(provider.threadsGeneralFinding({ path: null, line: null, severity: 'warning', kind: 'requirement', body: 'x' }, [])).toBe(true);
+    });
+  });
+
   describe('postReview', () => {
     it('throws when called before fetchPr', () => {
       const provider = new GitLabProvider();
@@ -89,8 +141,7 @@ describe('GitLabProvider', () => {
         provider.postReview(
           { slug: 'g/p', number: 1 },
           'sha',
-          { summary: '', verdict: 'COMMENT', comments: [] },
-          [],
+          { summary: '', verdict: 'COMMENT', inline: [] },
         ),
       ).toThrow('called before fetchPr');
     });
@@ -101,8 +152,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'ok', verdict: 'APPROVE', comments: [] },
-        [{ path: 'a.ts', line: 5, severity: 'warning', body: 'bug' }],
+        { summary: 'ok', verdict: 'APPROVE', inline: [{ path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'bug' }] },
       );
 
       expect(mockExec).toHaveBeenCalled();
@@ -117,8 +167,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/subgroup/project', number: 7 },
         'head-sha',
-        { summary: 'ok', verdict: 'COMMENT', comments: [] },
-        [],
+        { summary: 'ok', verdict: 'COMMENT', inline: [] },
       );
 
       expect(cmd(mockExec.mock.calls[0])).toContain('projects/group%2Fsubgroup%2Fproject/merge_requests/7');
@@ -130,12 +179,11 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: '', verdict: 'COMMENT', comments: [] },
-        [{ path: 'a.ts', line: 5, severity: 'warning', body: 'bug' }],
+        { summary: '', verdict: 'COMMENT', inline: [{ path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'bug' }] },
       );
 
       const payload = getPayload(mockExec.mock.calls[0]);
-      expect(payload.body).toBe('**[warning]** bug');
+      expect(payload.body).toBe('**[warning · bug]** bug');
       expect(payload.position).toEqual({
         base_sha: 'base-sha',
         start_sha: 'start-sha',
@@ -152,8 +200,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'lgtm', verdict: 'APPROVE', comments: [] },
-        [],
+        { summary: 'lgtm', verdict: 'APPROVE', inline: [] },
       );
 
       const endpoints = mockExec.mock.calls.map((c) => cmd(c));
@@ -166,8 +213,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'feedback', verdict: 'COMMENT', comments: [] },
-        [],
+        { summary: 'feedback', verdict: 'COMMENT', inline: [] },
       );
 
       const endpoints = mockExec.mock.calls.map((c) => cmd(c));
@@ -180,8 +226,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'needs work', verdict: 'REQUEST_CHANGES', comments: [] },
-        [],
+        { summary: 'needs work', verdict: 'REQUEST_CHANGES', inline: [] },
       );
 
       const endpoints = mockExec.mock.calls.map((c) => cmd(c));
@@ -194,8 +239,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'needs work', verdict: 'REQUEST_CHANGES', comments: [] },
-        [],
+        { summary: 'needs work', verdict: 'REQUEST_CHANGES', inline: [] },
       );
 
       const noteCall = mockExec.mock.calls.find((c) => cmd(c).includes('/notes'));
@@ -208,8 +252,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'lgtm', verdict: 'APPROVE', comments: [] },
-        [],
+        { summary: 'lgtm', verdict: 'APPROVE', inline: [] },
       );
 
       const noteCall = mockExec.mock.calls.find((c) => cmd(c).includes('/notes'));
@@ -222,11 +265,10 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'lgtm', verdict: 'APPROVE', comments: [] },
-        [
-          { path: 'a.ts', line: 5, severity: 'warning', body: 'b1' },
-          { path: 'b.ts', line: 10, severity: 'critical', body: 'b2' },
-        ],
+        { summary: 'lgtm', verdict: 'APPROVE', inline: [
+          { path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'b1' },
+          { path: 'b.ts', line: 10, severity: 'critical', kind: 'bug', body: 'b2' },
+        ] },
       );
 
       const endpoints = mockExec.mock.calls.map((c) => cmd(c));
@@ -244,8 +286,7 @@ describe('GitLabProvider', () => {
       provider.postReview(
         { slug: 'group/project', number: 1 },
         'head-sha',
-        { summary: 'ok', verdict: 'APPROVE', comments: [] },
-        [{ path: 'a.ts', line: 5, severity: 'warning', body: 'bug' }],
+        { summary: 'ok', verdict: 'APPROVE', inline: [{ path: 'a.ts', line: 5, severity: 'warning', kind: 'bug', body: 'bug' }] },
         true,
       );
 

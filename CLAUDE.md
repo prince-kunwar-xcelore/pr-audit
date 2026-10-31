@@ -4,63 +4,78 @@ CLI tool that reviews pull requests / merge requests using AI and posts results 
 
 ## Architecture
 
+See `GLOSSARY.md` for the domain vocabulary (review session, verification, finding, inline / general finding, severity, kind, follow-up, …) and `docs/adr/` for the design decisions.
+
 ```
 src/
-  index.ts              CLI entry point, orchestration loop
-  types.ts              Shared types: PrRef, PrData, ReviewOutput, BatchResult, etc.
+  index.ts              CLI entry point: flags, fetch PR + history + linked issues, prepare checkout, runReview, usage report
+  review.ts             runReview(): review session → verification session → placement → verdict → post → follow-ups
+  prompt.ts             Review / verification prompts and their JSON schemas
+  checkout.ts           prepareCheckout(): current dir, temp worktree, or blobless clone at the PR head; git helpers
+  requirements.ts       Linked-issue references from provider links, title, description, branch, commits
+  types.ts              Shared types: PrData, Finding, ReviewPost, session outputs, SessionUsage, …
   provider.ts           GitProvider interface + resolveProvider() auto-detection
-  engine.ts             ReviewEngine interface + resolveEngine() factory
+  engine.ts             ReviewEngine interface (one agent session), engineEnv() allowlist, error types + detectors
   auth-token.ts         Credentials from --auth-token / --auth-token-file / env; argv redaction for logs
-  claude.ts             Prompt building (buildPrompt, buildSynthesisPrompt) + mergeResults
-  diff.ts               Unified diff parsing, file filtering, chunking, comment validation
-  review-history.ts     Incremental reviews: SHA marker, earlier pr-audit threads (open/resolved/outdated), open-findings verdict hold
+  diff.ts               Unified diff parsing: reviewable files and their commentable lines
+  review-history.ts     SHA + body-findings markers, earlier pr-audit threads, finding tags
   logger.ts             Dual-stream logging (console + file)
   providers/
-    github.ts           GitHubProvider — fetches via `gh` CLI, posts via GitHub API
-    gitlab.ts           GitLabProvider — fetches via `glab` CLI, posts discussions/notes/approve via GitLab API
+    github.ts           GitHubProvider — gh CLI: GraphQL PR metadata, issues, reviews, file comments, thread replies/resolution
+    gitlab.ts           GitLabProvider — glab CLI: MR metadata, issues, discussions/notes/approve
   engines/
-    claude-cli.ts       ClaudeCliEngine — calls `claude -p` CLI
-    codex-cli.ts        CodexCliEngine — calls `codex exec --json --output-schema` CLI
-    mock.ts             MockEngine — canned responses for testing
+    claude-cli.ts       ClaudeCliEngine — `claude -p --restricted --safe-mode` read-only session in the checkout
+    codex-cli.ts        CodexCliEngine — `codex exec --sandbox read-only` session in the checkout, live web search; `codex sandbox -- true` preflight (CodexSandboxError)
+    mock.ts             MockEngine — per-label queues of canned session answers
   mocks/
-    provider.ts         MockProvider — canned PR data for testing
+    provider.ts         MockProvider — canned PR data / history / issues for testing
 ```
 
 ## Key Abstractions
 
 **GitProvider** (`src/provider.ts`):
-- `fetchPr(ref: PrRef): PrData` — get PR metadata + unified diff
-- `postReview(ref, headSha, review, comments)` — post review back to platform
+- `fetchPr(ref): PrData` — title, description, URL, head/base SHAs and branches, commit messages, provider closing-issue links
+- `cloneRepo(ref, dir)` — clone with the provider CLI (fallback checkout)
+- `fetchIssue(issueRef)` — linked issue content + comments, or null (missing / a PR)
+- `postReview(ref, headSha, ReviewPost, dryRun)` — inline findings on diff lines, `threaded` general findings as their own threads
+- `threadsGeneralFinding(finding, prPaths)` — whether a general finding can be its own thread (GitHub: file in the PR; GitLab: always); the rest go in the review body
 - `reportSkipped(ref, headSha, title, body)` — comment (+ neutral check run on GitHub) when no review was produced
-- optional `fetchReviewHistory(ref)` / `fetchDiffSince(ref, fromSha, headSha)` — incremental reviews (GitHub only; providers without them get full reviews)
+- optional `fetchReviewHistory(ref)` / `applyFollowUps(ref, posts)` — incremental reviews and follow-ups (GitHub only so far)
 - Auto-detected from input: `owner/repo#123` → GitHub, `group/project!123` → GitLab
 
 **ReviewEngine** (`src/engine.ts`):
-- `review(prompt, model): BatchResult` — structured JSON review of a diff batch
-- `synthesize(prompt, model): string` — plain text summary synthesis
-- `defaultModel` — each engine knows its default (`claude-sonnet-5-5`, `gpt-6.1-sol`); effort comes from `--effort` (default medium) and is passed as `claude --effort` / codex `-c model_reasoning_effort`
-- Engines throw `UsageLimitError` (via `detectUsageLimit()`) when the agent subscription is out of quota; `index.ts` skips retries, calls `reportSkipped()`, and exits 0 on GitHub Actions / 3 elsewhere (`EXIT_USAGE_LIMIT`)
-- Engines throw `AgentAuthError` (via `detectAuthError()`) when the agent CLI's credentials are missing/expired/rejected; `index.ts` skips retries, prints one line (plus a `::error` annotation on GitHub Actions), and exits 1
-- Both detectors only see failure text (Claude's error envelope `result`, Codex `turn.failed`/`error` events, stderr), never agent messages that may quote the diff
+- `run<T>({ label, prompt, schema, cwd, model, timeoutMs }): { output: T, usage }` — one agent session working in `cwd` (the checkout), answering with JSON matching `schema`
+- Read-only: file read/search, read-only git (`READ_ONLY_GIT`), web search/fetch; never writes or runs the project
+- The agent CLI's environment is `engineEnv()`: an allowlist (PATH, HOME, locale, proxies, engine config dirs) plus its credentials — no `GH_TOKEN` or CI secrets
+- `defaultModel` — `claude-sonnet-5-5` / `gpt-6.1-sol`; effort from `--effort` (default medium) as `claude --effort` / codex `-c model_reasoning_effort`
+- Engines throw `UsageLimitError` (via `detectUsageLimit()`) when the subscription is out of quota; `index.ts` calls `reportSkipped()` and exits 0 on GitHub Actions / 3 elsewhere (`EXIT_USAGE_LIMIT`)
+- Engines throw `AgentAuthError` (via `detectAuthError()`) on missing/expired/rejected credentials; exit 1 with one line (plus `::error` on GitHub Actions)
+- Engines throw `SessionTimeoutError` when the session exceeds `timeoutMs`; a review timeout exits 1, a verification timeout posts the review unverified
+- Detectors only see failure text (Claude's error envelope `result`, Codex `turn.failed`/`error` events, stderr), never agent messages that may quote the PR
+- `review.ts` retries a session once on other errors; never on usage limit, auth or timeout
 
 ## Data Flow
 
 ```
 parseArgs → resolveProvider + resolveEngine
-  → provider.fetchPr() → parseDiffString()  (prFiles: the whole PR)
-  → provider.fetchReviewHistory?() → fetchDiffSince?(lastSha)  (files: only new changes, unless --full)
-  → chunkFiles()
-  → for each batch: buildPrompt(…, { sinceSha, priorThreads }) → engine.review()
-  → mergeResults()
-  → if multi-batch: buildSynthesisPrompt() → engine.synthesize()
-  → validateComments() against files, then prFiles
-  → append reviewMarker(headSha) to the summary → provider.postReview()
+  → provider.fetchPr() → provider.fetchReviewHistory?()   (exit if head already reviewed)
+  → findIssueMentions() → provider.fetchIssue() ×≤10
+  → prepareCheckout()   (current dir | worktree | clone, at headSha with baseSha [+ lastSha])
+  → runReview():
+      git diff mergeBase..head → prFiles; incremental scope lastSha..head (exit if nothing reviewable)
+      → engine.run(review)        buildReviewPrompt: PR, requirements, open threads T1…, closed one-liners, last body findings
+      → engine.run(verification)  buildVerifyPrompt: candidates F1…, resolutions to confirm   (unless --no-verify / nothing to verify)
+      → placeFindings() inline | general → threaded | body
+      → deriveVerdict(findings + still-open blocking threads)
+      → provider.postReview()  body ends with reviewMarker(head) + generalMarker(body findings)
+      → provider.applyFollowUps?()
+  → checkout.cleanup() → usage report (log + GITHUB_STEP_SUMMARY)
 ```
 
 ## CLI Flags
 
 ```
-pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider <provider>] [--full] [--dry-run]
+pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-token <token> | --auth-token-file <path>] [--provider <provider>] [--full] [--no-verify] [--timeout <minutes>] [--dry-run]
 ```
 
 - `--engine`: Review engine — `claude-cli` (default) or `codex-cli`. Required if `--model` is set.
@@ -69,7 +84,9 @@ pr-audit <ref> [--engine <engine>] [--model <model>] [--effort <level>] [--auth-
 - `--auth-token` / `--auth-token-file` / `$PR_AUDIT_AUTH_TOKEN` (that precedence, see `src/auth-token.ts`): Auth token passed to the engine — `claude-cli`: Claude credentials JSON or OAuth access token; `codex-cli`: contents of `~/.codex/auth.json` or an OpenAI API key. Empty-but-given is an error; the `--auth-token` value is redacted from the logged command line.
 - `--provider`: Explicit git provider override (default: auto-detected from input).
 - `--full`: Review the whole PR even if an earlier pr-audit review exists (default: only changes since the commit in the last review's `<!-- pr-audit:sha=… -->` marker; GitHub only).
-- `--dry-run`: Run the review but log the would-be API payload instead of posting. Providers must honor the `dryRun` flag in `postReview()`.
+- `--no-verify`: Skip the verification session (default: on).
+- `--timeout`: Review session limit in minutes (default 20); verification gets half (default 10).
+- `--dry-run`: Run the review but log the would-be API payloads (review, file comments, follow-ups) instead of posting. Providers must honor the `dryRun` flag.
 
 ## Tech Stack
 
@@ -98,7 +115,7 @@ pnpm test                        # run once
 pnpm test:watch                  # watch mode
 ```
 
-Tests use `MockEngine` and `MockProvider` for isolation. The null logger is injected via `test/setup.ts`. Provider-specific tests live in `test/providers/<name>.test.ts` and mock `child_process.execFileSync` to assert on the exact command arguments + payload (without hitting the network).
+Tests use `MockEngine` and `MockProvider` for isolation (`test/review.test.ts` drives `runReview()` end to end with a fake `Workspace`). The null logger is injected via `test/setup.ts`. Provider and engine tests live in `test/providers/` and `test/engines/` and mock `child_process.execFileSync` to assert on the exact command arguments + payload (without hitting the network). `test/checkout.test.ts` uses real temporary git repos.
 
 ## Maintenance
 
@@ -108,3 +125,4 @@ After any change that affects CLI usage, flags, architecture, build commands, or
 
 See `plans/` for outstanding tasks:
 - `plans/additional-engines.md` — OpenAI, Ollama, Anthropic API engines
+- `plans/agentic-review-followups.md` — config file, Jira tracker, verify engine/effort flags, GitLab incremental + follow-ups
