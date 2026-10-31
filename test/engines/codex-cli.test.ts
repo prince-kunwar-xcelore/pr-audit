@@ -41,9 +41,15 @@ function events(text: string): string {
   ].map((e) => JSON.stringify(e)).join('\n');
 }
 
+/** Calls to `codex exec` (the first call of an engine is the `codex sandbox` preflight). */
+const execCalls = () => mockExec.mock.calls.filter((c) => (c[1] as string[])[0] === 'exec');
+
 describe('CodexCliEngine', () => {
   beforeEach(() => {
     mockExec.mockReset();
+    vi.restoreAllMocks();
+    // The sandbox preflight has its own tests below
+    vi.spyOn(CodexCliEngine.prototype as unknown as { checkSandbox(): void }, 'checkSandbox').mockImplementation(() => {});
   });
 
   it('runs codex exec with a strict output schema and parses the review', () => {
@@ -55,7 +61,7 @@ describe('CodexCliEngine', () => {
 
     const result = new CodexCliEngine().run(req());
 
-    const [cmd, args, opts] = mockExec.mock.calls[0] as [string, string[], { input: string; env: NodeJS.ProcessEnv; timeout: number }];
+    const [cmd, args, opts] = execCalls()[0] as [string, string[], { input: string; env: NodeJS.ProcessEnv; timeout: number }];
     expect(cmd).toBe('codex');
     expect(args).toEqual(expect.arrayContaining(['exec', '--model', 'gpt-test', '--json', '--sandbox', 'read-only']));
     expect(args[args.indexOf('-c') + 1]).toBe('model_reasoning_effort="medium"');
@@ -84,7 +90,7 @@ describe('CodexCliEngine', () => {
     try {
       mockExec.mockReturnValue(events(JSON.stringify(REVIEW)));
       new CodexCliEngine().run(req());
-      const env = (mockExec.mock.calls[0][2] as { env: NodeJS.ProcessEnv }).env;
+      const env = (execCalls()[0][2] as { env: NodeJS.ProcessEnv }).env;
       expect(env.GH_TOKEN).toBeUndefined();
       expect(env.PR_AUDIT_AUTH_TOKEN).toBeUndefined();
       expect(env.PATH).toBe(process.env.PATH);
@@ -178,6 +184,25 @@ describe('CodexCliEngine', () => {
       throw err;
     });
     expect(() => new CodexCliEngine().run(req())).toThrow('Codex returned an error: stream disconnected before completion');
+  });
+
+  it('fails with the fix when the sandbox cannot start, without running a session', () => {
+    vi.restoreAllMocks();
+    mockExec.mockImplementation(((_c: string, args: string[]) => {
+      if (args[0] === 'sandbox') throw Object.assign(new Error('Command failed'), { stderr: 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n' });
+      return events(JSON.stringify(REVIEW));
+    }) as typeof execFileSync);
+    expect(() => new CodexCliEngine().run(req())).toThrow(/bwrap: loopback[\s\S]*apparmor_restrict_unprivileged_userns=0/);
+    expect(execCalls()).toHaveLength(0);
+  });
+
+  it('checks the sandbox once per engine', () => {
+    vi.restoreAllMocks();
+    mockExec.mockReturnValue(events(JSON.stringify(REVIEW)));
+    const engine = new CodexCliEngine();
+    engine.run(req());
+    engine.run(req({ label: 'verification' }));
+    expect(mockExec.mock.calls.filter((c) => (c[1] as string[])[0] === 'sandbox')).toHaveLength(1);
   });
 
   it('rejects JSON auth without tokens or an API key up front, before creating temp dirs', () => {

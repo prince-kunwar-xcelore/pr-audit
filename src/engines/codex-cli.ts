@@ -77,6 +77,14 @@ function failureText(stdout = '', stderr = ''): string {
   return [...failed, ...errors, stderr].join('\n');
 }
 
+/** The environment can't run Codex's sandbox. Not retried: it won't fix itself. */
+export class CodexSandboxError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CodexSandboxError';
+  }
+}
+
 export class CodexCliEngine implements ReviewEngine {
   readonly name = 'Codex CLI';
   readonly defaultModel = 'gpt-6.1-sol';
@@ -95,8 +103,31 @@ export class CodexCliEngine implements ReviewEngine {
     if (err) throw err;
   }
 
+  private sandboxChecked = false;
+
+  /**
+   * Codex reads files only through shell commands in its sandbox. Where the sandbox can't start
+   * (e.g. Ubuntu 24.04 GitHub runners restrict unprivileged user namespaces, so bubblewrap fails)
+   * the agent reviews blind; fail with the fix instead.
+   */
+  private checkSandbox(cwd: string): void {
+    if (this.sandboxChecked) return;
+    try {
+      execFileSync('codex', ['sandbox', '--', 'true'], { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30_000, env: engineEnv() });
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException & { stderr?: string };
+      const why = (e.stderr ?? e.message).trim().split('\n')[0];
+      throw new CodexSandboxError(
+        `Codex's sandbox can't start here (${why}), so the agent couldn't read the checkout. ` +
+          'On GitHub Actions Ubuntu runners, run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` before pr-audit.',
+      );
+    }
+    this.sandboxChecked = true;
+  }
+
   run<T>(req: SessionRequest): SessionResult<T> {
     log.debug(`Codex ${req.label} prompt:\n${req.prompt}`);
+    this.checkSandbox(req.cwd);
 
     // Schema and credentials live outside the checkout. The read-only sandbox can still read
     // them (no path rules), an accepted risk (ADR 0002)

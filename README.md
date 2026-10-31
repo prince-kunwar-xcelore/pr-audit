@@ -143,6 +143,19 @@ permissions:
 The credentials never appear in a command line, and if `decrypt-token` fails the job stops at that
 step with its real error instead of reviewing with an empty token.
 
+**Codex on GitHub-hosted Ubuntu runners** needs one more step before the review. Codex reads files only through shell
+commands in its bubblewrap sandbox, and Ubuntu 24.04 runners restrict the unprivileged user namespaces that sandbox
+needs (`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`):
+
+```yaml
+- name: Allow the Codex sandbox
+  if: env.REVIEW_AGENT == 'codex'
+  run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+pr-audit checks the sandbox before the first Codex session and fails with this hint rather than letting the agent
+review without being able to read the checkout.
+
 The templates check out agent-gateway and pr-audit at pinned commits (the `# pin: … main` lines), so a push to
 either tool doesn't change what runs with your credentials. To move the pins to the current `main`, run
 agent-gateway's `scripts/pin-review-tools.sh <workflow files…>` and commit the result.

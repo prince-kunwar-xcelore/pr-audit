@@ -17,6 +17,7 @@ import { readAuthToken, redactArgs, AUTH_TOKEN_ENV } from './auth-token.js';
 import { findIssueMentions, issueLabel, MAX_ISSUES, trimIssue } from './requirements.js';
 import { gitDiff, hasCommit, isAncestor, mergeBase, prepareCheckout, type Checkout } from './checkout.js';
 import { runReview, type ReviewOutcome, type SessionReport, type Workspace } from './review.js';
+import { CodexSandboxError } from './engines/codex-cli.js';
 
 /** Default session time limits, in minutes. */
 export const DEFAULT_REVIEW_TIMEOUT_MIN = 20;
@@ -295,6 +296,14 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (err) => {
+  if (err instanceof CodexSandboxError) {
+    log.section('FAILED: CODEX SANDBOX');
+    if (!log.filePath) console.error(`Error: ${err.message}`);
+    log.error(err.message);
+    if (process.env.GITHUB_ACTIONS === 'true') console.log(`::error title=Codex sandbox unavailable::${escapeData(err.message)}`);
+    await log.close();
+    process.exit(1);
+  }
   if (err instanceof SessionTimeoutError) {
     log.section('FAILED: SESSION TIMEOUT');
     if (!log.filePath) console.error(`Error: ${err.message}`);

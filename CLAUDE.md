@@ -25,7 +25,7 @@ src/
     gitlab.ts           GitLabProvider — glab CLI: MR metadata, issues, discussions/notes/approve
   engines/
     claude-cli.ts       ClaudeCliEngine — `claude -p --restricted --safe-mode` read-only session in the checkout
-    codex-cli.ts        CodexCliEngine — `codex exec --sandbox read-only` session in the checkout, live web search
+    codex-cli.ts        CodexCliEngine — `codex exec --sandbox read-only` session in the checkout, live web search; `codex sandbox -- true` preflight (CodexSandboxError)
     mock.ts             MockEngine — per-label queues of canned session answers
   mocks/
     provider.ts         MockProvider — canned PR data / history / issues for testing

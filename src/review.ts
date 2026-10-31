@@ -7,6 +7,7 @@ import {
   type SessionRequest,
 } from './engine.js';
 import { parseDiffString } from './diff.js';
+import { CodexSandboxError } from './engines/codex-cli.js';
 import { buildReviewPrompt, buildVerifyPrompt, REVIEW_SCHEMA, VERIFY_SCHEMA, type ReviewContext } from './prompt.js';
 import { issueLabel } from './requirements.js';
 import {
@@ -84,7 +85,7 @@ async function withRetry<T>(fn: () => T, label: string, delayMs: number): Promis
   try {
     return fn();
   } catch (err) {
-    if (err instanceof UsageLimitError || err instanceof AgentAuthError || err instanceof SessionTimeoutError) throw err;
+    if (err instanceof UsageLimitError || err instanceof AgentAuthError || err instanceof SessionTimeoutError || err instanceof CodexSandboxError) throw err;
     log.warn(`${label} session failed (${(err as Error).message.split('\n')[0]}) — retrying once in ${delayMs / 1000}s...`);
     await new Promise((r) => setTimeout(r, delayMs));
     return fn();
