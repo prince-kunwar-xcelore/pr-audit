@@ -86,6 +86,15 @@ describe('GitHubProvider.postReview', () => {
     new GitHubProvider().postReview(ref, 'sha1', { summary, verdict: 'REQUEST_CHANGES', inline: [] });
     expect(mockExec).toHaveBeenCalledTimes(2);
 
+    // an earlier run's review on the same commit (different body) doesn't count
+    mockExec.mockReset();
+    mockExec
+      .mockImplementationOnce(internal)
+      .mockReturnValueOnce(JSON.stringify({ commit_id: 'sha1', body: 'older review\n\n<!-- pr-audit:sha=sha1 -->', user: { login: 'github-actions[bot]' } }))
+      .mockReturnValueOnce('{}');
+    new GitHubProvider().postReview(ref, 'sha1', { summary, verdict: 'REQUEST_CHANGES', inline: [] });
+    expect(mockExec).toHaveBeenCalledTimes(3);
+
     // failing twice: gives up
     mockExec.mockReset();
     mockExec.mockImplementation((...args: unknown[]) => {

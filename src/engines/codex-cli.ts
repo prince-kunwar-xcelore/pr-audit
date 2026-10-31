@@ -115,8 +115,10 @@ export class CodexCliEngine implements ReviewEngine {
     try {
       execFileSync('codex', ['sandbox', '--', 'true'], { cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30_000, env: engineEnv() });
     } catch (err) {
-      const e = err as NodeJS.ErrnoException & { stderr?: string };
-      const why = (e.stderr ?? e.message).trim().split('\n')[0];
+      const e = err as NodeJS.ErrnoException & { stderr?: string; status?: number | null };
+      // Only a sandbox that ran and failed is a sandbox problem; a missing codex or a hang is not
+      if (typeof e.status !== 'number' || isTimeout(e)) throw err;
+      const why = (e.stderr?.trim() || e.message).split('\n')[0];
       throw new CodexSandboxError(
         `Codex's sandbox can't start here (${why}), so the agent couldn't read the checkout. ` +
           'On GitHub Actions Ubuntu runners, run `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` before pr-audit.',

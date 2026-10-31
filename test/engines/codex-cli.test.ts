@@ -189,11 +189,19 @@ describe('CodexCliEngine', () => {
   it('fails with the fix when the sandbox cannot start, without running a session', () => {
     vi.restoreAllMocks();
     mockExec.mockImplementation(((_c: string, args: string[]) => {
-      if (args[0] === 'sandbox') throw Object.assign(new Error('Command failed'), { stderr: 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n' });
+      if (args[0] === 'sandbox') throw Object.assign(new Error('Command failed'), { status: 1, stderr: 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n' });
       return events(JSON.stringify(REVIEW));
     }) as typeof execFileSync);
     expect(() => new CodexCliEngine().run(req())).toThrow(/bwrap: loopback[\s\S]*apparmor_restrict_unprivileged_userns=0/);
     expect(execCalls()).toHaveLength(0);
+  });
+
+  it('rethrows a missing codex binary as it is, not as a sandbox problem', () => {
+    vi.restoreAllMocks();
+    mockExec.mockImplementation(() => {
+      throw Object.assign(new Error('spawnSync codex ENOENT'), { code: 'ENOENT' });
+    });
+    expect(() => new CodexCliEngine().run(req())).toThrow('spawnSync codex ENOENT');
   });
 
   it('checks the sandbox once per engine', () => {
