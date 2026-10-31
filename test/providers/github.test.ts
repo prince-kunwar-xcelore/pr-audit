@@ -69,6 +69,32 @@ describe('GitHubProvider.postReview', () => {
     expect(retry.body).toMatch(/Approved by AI review[\s\S]*LGTM/);
   });
 
+  it('retries once when GitHub reports an internal error', () => {
+    const internal = () => {
+      throw Object.assign(new Error('Command failed'), { stdout: '{"message":"Unprocessable Entity","errors":["An internal error occurred, please try again."]}' });
+    };
+    const summary = 's\n\n<!-- pr-audit:sha=sha1 -->';
+    // not created: retried once
+    mockExec.mockImplementationOnce(internal).mockReturnValueOnce('').mockReturnValueOnce('{}');
+    new GitHubProvider().postReview(ref, 'sha1', { summary, verdict: 'REQUEST_CHANGES', inline: [] });
+    expect(mockExec).toHaveBeenCalledTimes(3);
+    expect(cmd(mockExec.mock.calls[1])).toBe('gh api --paginate repos/owner/repo/pulls/7/reviews --jq .[] | tojson');
+
+    // created despite the error: not posted again
+    mockExec.mockReset();
+    mockExec.mockImplementationOnce(internal).mockReturnValueOnce(JSON.stringify({ commit_id: 'sha1', body: summary, user: { login: 'github-actions[bot]' } }));
+    new GitHubProvider().postReview(ref, 'sha1', { summary, verdict: 'REQUEST_CHANGES', inline: [] });
+    expect(mockExec).toHaveBeenCalledTimes(2);
+
+    // failing twice: gives up
+    mockExec.mockReset();
+    mockExec.mockImplementation((...args: unknown[]) => {
+      if ((args[1] as string[]).includes('--paginate')) return '';
+      return internal();
+    });
+    expect(() => new GitHubProvider().postReview(ref, 'sha1', { summary, verdict: 'REQUEST_CHANGES', inline: [] })).toThrow('Command failed');
+  });
+
   it('does not retry other failures', () => {
     mockExec.mockImplementationOnce(() => { throw Object.assign(new Error('boom'), { stdout: '{"message":"Not Found"}' }); });
     expect(() => new GitHubProvider().postReview(ref, 'sha1', { summary: 's', verdict: 'APPROVE', inline: [] })).toThrow('boom');

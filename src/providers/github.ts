@@ -166,7 +166,7 @@ export class GitHubProvider implements GitProvider {
     return !!finding.path && prPaths.includes(finding.path);
   }
 
-  postReview(ref: PrRef, headSha: string, review: ReviewPost, dryRun = false): void {
+  postReview(ref: PrRef, headSha: string, review: ReviewPost, dryRun = false, attempt = 1): void {
     const endpoint = `/repos/${ref.slug}/pulls/${ref.number}/reviews`;
 
     const payload = {
@@ -199,6 +199,17 @@ export class GitHubProvider implements GitProvider {
     } catch (err) {
       const e = err as NodeJS.ErrnoException & { stderr?: string; stdout?: string };
       // Repos (and orgs) can forbid GitHub Actions from approving PRs; post the approval as a comment review instead
+      // GitHub can answer 422 "An internal error occurred" (or a 5xx) and still create the review:
+      // check before retrying, or the PR gets it twice
+      if (attempt === 1 && /internal error occurred|HTTP 50[234]/i.test(`${e.stdout ?? ''}${e.stderr ?? ''}`)) {
+        if (this.reviewPosted(ref, headSha, review.summary)) {
+          log.warn('[warn] GitHub reported an internal error, but the review was created');
+          return;
+        }
+        log.warn('[warn] GitHub failed to create the review (internal error) — retrying once');
+        this.postReview(ref, headSha, review, dryRun, 2);
+        return;
+      }
       if (review.verdict === 'APPROVE' && /not permitted to approve/i.test(`${e.stdout ?? ''}${e.stderr ?? ''}`)) {
         log.warn('[warn] GitHub Actions may not approve PRs in this repo — posting the review as COMMENT');
         this.postReview(
@@ -206,6 +217,7 @@ export class GitHubProvider implements GitProvider {
           headSha,
           { ...review, verdict: 'COMMENT', summary: `✅ **Approved by AI review** (posted as a comment: GitHub Actions can't approve PRs in this repo).\n\n${review.summary}` },
           dryRun,
+          attempt,
         );
         return;
       }
@@ -216,6 +228,18 @@ export class GitHubProvider implements GitProvider {
     }
     log.debug(`GitHub response:\n${response}`);
     log.info(`Review posted: ${review.verdict} (${review.inline.length} inline comment(s))`);
+  }
+
+  /** Whether a review on `headSha` with this body (compared by its markers) already exists. */
+  private reviewPosted(ref: PrRef, headSha: string, summary: string): boolean {
+    const marker = /<!-- pr-audit:sha=[0-9a-f]+ -->/.exec(summary)?.[0];
+    try {
+      return listAll<GitHubReview>(`repos/${ref.slug}/pulls/${ref.number}/reviews`).some(
+        (r) => r.commit_id === headSha && (marker ? (r.body ?? '').includes(marker) : (r.body ?? '') === summary),
+      );
+    } catch {
+      return false;
+    }
   }
 
   postGeneralThread(ref: PrRef, headSha: string, finding: Finding, dryRun = false): void {

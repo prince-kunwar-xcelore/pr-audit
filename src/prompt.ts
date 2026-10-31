@@ -189,7 +189,7 @@ Where a finding goes:
 
 Be concise: 1-3 sentences per finding, concrete, saying what goes wrong and when. One finding per problem. No praise, no restating the diff. If there is nothing worth raising, return no findings.
 
-summary: 2-4 sentences on what the PR does and the most important problems, for the PR author.${open}${closedSection}${body}`;
+summary: 2-4 sentences on what the PR does and the most important problems, for the PR author. Don't mention thread or finding ids (T1, F1): readers never see them.${open}${closedSection}${body}`;
 }
 
 export interface VerifyContext extends ReviewContext {
